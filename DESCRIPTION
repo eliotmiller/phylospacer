@@ -1,0 +1,29 @@
+Package: phylospacer
+Title: Tools for creating and plotting phyloclimate and phylomorphospaces
+Description: This package takes, at a minimum, an ape-style phylogeny, a matrix
+    of species' traits, and a matrix of reconstructed node traits. From these
+    files it creates a phylospace object. This phylospace object can be
+    modified by arguments to subset the phylogeny to a given node, including,
+    if desired, all nodes between the node in question and the root of the
+    tree. Points can also be jittered if desired, which can help to distinguish
+    species with identical trait values. The phylospace object can then be
+    plotted. A number of arguments can be modified here: whether or not to plot
+    available climate or trait space behind the phylospace figure, whether to
+    include species' and/or node labels in the figure, the amount by which to
+    offset the species' labels, labels for the x and y axes (required), and x
+    and y limits for the plot. Subsequent versions of this package will likely
+    include statistical tests to be run on the phylospace object.
+Version: 0.1
+Authors@R: 'Eliot Miller <eliot.isaac@gmail.com> [aut, cre]'
+Depends:
+    R (>= 3.0.1)
+Imports:
+    ape,
+    phylobase,
+    plotrix
+License: GPL-3
+LazyData: true
+Collate:
+    'phylospace.R'
+    'plot_phylospace.R'
+    'quadrant.R'

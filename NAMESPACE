@@ -1,0 +1,5 @@
+S3method(plot,phylospace)
+export(phylospace)
+import(ape)
+import(phylobase)
+import(plotrix)

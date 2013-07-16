@@ -1,0 +1,11 @@
+phylospacer is a package for creating and plotting phyloclimate or phylomorphospaces. Such 
+plots are a useful and interesting means of visualizing evolution of a clade through 
+climate or morphological space. Liam Revell's phytools package has a function that can 
+plot phylomorphospaces, including doing the ancestral character state reconstruction 
+automatically, and plotting three traits (3d). phylospacer differs in that it returns a 
+phylospace object, on which subsequent calculations can be run (though such calculations 
+are not yet implemented), and it can plot figures where the branches are colored 
+proportional to time. A number of additional useful options are offered in phylospacer, 
+including the ability to plot available climate space. Currently, there are only two main 
+functions in the package: phylospace() will create the phylospace. plot.phylospace() 
+will plot it. Both have a number of modifiable arguments. 
