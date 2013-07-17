@@ -1,3 +1,3935 @@
+?phylo4com
+test <- phylo4com(phylo, cdm)
+phylo
+library(picante)
+this script is to be used for calculating all metrics of interest for our simulation study#
+##because ecoPD turns out to be uninstallable from CRAN repositories, it's probably a wise choice#
+##to install all functions manually, rather than have to figure out how to get it installed#
+#
+##first load the packages ecoPD depends on#
+#
+library(phylobase)#
+library(grid)#
+library(Rcpp)#
+#
+##define the function called utilities.R#
+#
+# internal function to compute distances from one node to all others#
+# NOTE: assumes node IDs are always 1:n (currently true of phylo4 objs)#
+dijkstra <- function(phy, node) {#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- rep(Inf, length=n)#
+  names(d) <- nodes#
+  d[node] <- 0#
+  while (length(nodes)>0) {#
+    u <- nodes[which.min(d[nodes])[[1]]]#
+    if (is.infinite(d[u])) break#
+    nodes <- nodes[-match(u, nodes)]#
+    anc <- edge[edge[,2]==u,1]#
+    for (parent in anc[anc %in% nodes]) {#
+      alt <- d[u] + elen[paste(parent, u, sep="-")]#
+      if (alt < d[parent]) {#
+        d[parent] <- alt#
+      }#
+    }#
+    des <- edge[edge[,1]==u,2]#
+    for (child in des[des %in% nodes]) {#
+      alt <- d[u] + elen[paste(u, child, sep="-")]#
+      if (alt < d[child]) {#
+        d[child] <- alt#
+      }#
+    }#
+  }#
+  d#
+}#
+#
+# tip length extractor#
+tipLength <- function(phy, from=c("parent", "root")) {#
+  from <- match.arg(from)#
+  tips <- nodeId(phy, type="tip")#
+  if (from=="parent") {#
+    len <- edgeLength(phy, tips)#
+  } else if (from=="root") {#
+    len <- dijkstra(phy, rootNode(phy))#
+    len <- len[match(tips, names(len))]#
+  }#
+  names(len) <- tipLabels(phy)#
+  return(len)#
+}#
+#
+# abundance extractor#
+abundance <- function(phy, comm, tip, na.zero=FALSE) {#
+    communities <- names(phy@metadata$comms)#
+    if (missing(comm)) {#
+        comm <- communities#
+    }#
+    doNotExist <- !comm %in% communities#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in phy: ",#
+            paste(comm[doNotExist], collapse=", "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- getNode(phy, tip, type="tip", missing="warn")#
+        tip <- names(tip)[!is.na(tip)]#
+    }#
+    N <- tipData(phy)[tip, comm, drop=FALSE]#
+    if (na.zero) N[is.na(N)] <- 0#
+    return(N)#
+}#
+#
+# abundance assignment function#
+`abundance<-` <- function(phy, comm, tip, value) {#
+    if (!is.atomic(comm) || length(comm)!=1) {#
+        stop("when replacing, comm must be a vector of length 1")#
+    } else if (!comm %in% names(phy@metadata$comms)) {#
+        stop(paste("community", comm, "not found in phy", sep=" "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- names(getNode(phy, tip, type="tip", missing="fail"))#
+    }#
+    tipData(phy)[tip, comm] <- value#
+    return(phy)#
+}#
+#
+presence <- function(phy, comm, tip, na.zero=FALSE) {#
+    N <- abundance(phy, comm, tip, na.zero=na.zero)#
+    N[N > 0] <- 1#
+    N[N <= 0] <- 0#
+    N#
+}#
+#
+richness <- function(phy, comm, na.zero=FALSE) {#
+    P <- presence(phy, comm, na.zero=na.zero)#
+    colSums(P)#
+}#
+#
+# minTL extractor#
+minTL <- function(phy) {#
+  minTL <- tipData(phy)$minTL#
+  if (!is.null(minTL)) {#
+    names(minTL) <- row.names(tipData(phy))#
+  }#
+  return(minTL)#
+}#
+#
+# Note: function assumes values are in nodeId(phy, "tip") order#
+# minTL assignment function#
+`minTL<-` <- function(phy, value) {#
+  if (!is.numeric(value)) {#
+    stop("minTL values must be a numeric vector")#
+  } else if (length(value)!=nTips(phy)) {#
+    stop("number of minTL values must equal number of species")#
+  }#
+  tipData(phy)[["minTL"]] <- value#
+  return(phy)#
+}#
+#
+# community labels extractor#
+communities <- function(x) {#
+  names(x@metadata$comms)#
+}#
+#
+## this works as implementation of dist.nodes for phylo4 objects, albeit#
+## about 1.5x slower than dist.nodes#
+pairdist <- function(phy, type=c("all", "tip"), use.labels=FALSE) {#
+#
+  if (hasPoly(phy) || hasRetic(phy)) {#
+    stop("pairdist can't currently handle polytomies or reticulation")#
+  }#
+#
+  type <- match.arg(type)#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  elen <- elen[!names(elen) %in% edgeId(phy, "root")]#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- matrix(NA_real_, nrow=n, ncol=n)#
+  diag(d) <- 0#
+  d[edge] <- d[edge[,2:1]] <- elen#
+  ntips <- nTips(phy)#
+  tips <- nodeId(phy, "tip")#
+  tip.parents <- sapply(tips, function(n) edge[edge[,2]==n, 1])#
+  nodes.todo <- tip.parents[duplicated(tip.parents)]#
+  done <- tips#
+  root <- if (isRooted(phy)) rootNode(phy) else ntips+1#
+  descendants <- matrix(edge[order(edge[,1]),2], nrow=2)#
+  ancestors <- edge[match(nodes, edge[,2]), 1]#
+#
+  while(length(nodes.todo)>0) {#
+    nod <- nodes.todo[1]#
+    if (nod==root && length(nodes.todo)>1) {#
+      nod <- nodes.todo[2]#
+    }#
+    des1 <- descendants[1, nod-ntips]#
+    des2 <- descendants[2, nod-ntips]#
+    if (des1>ntips) des1 <- which(!is.na(d[des1, ]))#
+    if (des2>ntips) des2 <- which(!is.na(d[des2, ]))#
+    for (y in des1) {#
+      d[y, des2] <- d[des2, y] <- d[nod, y] + d[nod, des2]#
+    }#
+    if (nod!=root) {#
+      anc <- ancestors[nod]#
+      l <- elen[paste(anc, nod, sep="-")]#
+      d[des2, anc] <- d[anc, des2] <- d[nod, des2] + l#
+      d[des1, anc] <- d[anc, des1] <- d[nod, des1] + l#
+      done <- c(done, nod)#
+      if (all(descendants[, anc-ntips] %in% done)) {#
+        nodes.todo <- c(nodes.todo, anc)#
+      }#
+    }#
+    nodes.todo <- nodes.todo[nod!=nodes.todo]#
+  }#
+#
+  if (type=="tip") {#
+    d <- d[1:ntips, 1:ntips]#
+  }#
+#
+  if (use.labels) {#
+    rownames(d) <- colnames(d) <- unname(labels(phy, type=type))#
+  } else {#
+    rownames(d) <- colnames(d) <- nodeId(phy, type=type)#
+  }#
+#
+  return(d)#
+}#
+#
+##define a function called coerce.R#
+#
+setMethod("phylo4d", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4d"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+#
+    ## get the tree#
+    tree <- phylo4(x, community)#
+#
+    ## get abundance values, and drop species with zero abundance#
+    N <- abundance(x, community)#
+    N <- N[N[[community]]!=0, , drop=FALSE]#
+#
+    ## combine and return phylo4d object#
+    phylo4d(tree, tip.data=N)#
+})#
+#
+setMethod("phylo4", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+    getSubtrees(x, community)[[1]]#
+})#
+#
+## internal helper function for extracting a list of the subtrees#
+## associated with each communities#
+getSubtrees <- function(x, community) {#
+    communities <- x@metadata$comms#
+    if (missing(community)) {#
+        community <- names(communities)#
+    }#
+    doNotExist <- !community %in% names(communities)#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in x: ",#
+            paste(community[doNotExist], collapse=", "))#
+    }#
+    res <- x@subtrees[communities[names(communities) %in% community]]#
+    names(res) <- community#
+    return(res)#
+}#
+##define phylo4com.R#
+#
+setClass("phylo4com",#
+    representation(subtrees="list"),#
+    prototype = list(subtrees = list()),#
+    validity = checkPhylo4,#
+    contains="phylo4d")#
+#
+## create single tree with all data in it, plus a list of subtrees (sans#
+## data) for each unique species composition#
+setGeneric("phylo4com", function(x, n, ...) {#
+    standardGeneric("phylo4com")#
+})#
+#
+setMethod("phylo4com", c("phylo", "ANY"),#
+  function(x, n, ..., check.node.labels="keep") {#
+    x <- phylo4(x, check.node.labels)#
+    phylo4com(x, n, ...)#
+})#
+#
+setMethod("phylo4com", c("phylo4", "numeric"),#
+  function(x, n, communityID, species,#
+    missing=c("warn", "OK", "fail")) {#
+#
+    ## create site-by-species abundance matrix#
+    comm <- factor(communityID, levels=unique(communityID))#
+    taxa <- factor(species)#
+    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+        dimnames=list(levels(taxa), unique(comm)))#
+    dat[cbind(taxa, comm)] <- n#
+#
+    ## hand off to the phylo4com matrix method#
+    phylo4com(x, dat, missing)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "matrix"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+#
+    taxa <- rownames(n)#
+    if (any(duplicated(taxa))) {#
+        stop("duplicated taxa are not permitted")#
+    }#
+    comm <- colnames(n)#
+    if (any(duplicated(comm))) {#
+        stop("duplicated community IDs are not permitted")#
+    }#
+#
+    phy <- subset(x, tips.include=taxa)#
+    phyd <- addData(phy, tip.data=n, extra.data="OK")#
+    phylo4com(phyd, cols=comm)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "data.frame"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+    n <- as.matrix(n)#
+    phylo4com(x, n, missing)#
+})#
+#
+setMethod("phylo4com", c("phylo4d", "missing"),#
+  function(x, n, cols) {#
+#
+    if (missing(cols)) {#
+        cols <- names(tipData(x))#
+    }#
+    if (is.null(cols)) {#
+        res <- as(x, "phylo4com")#
+        res@metadata$comms <- NULL#
+        return(res)#
+    }#
+    x@metadata$comms <- setNames(rep(NA, length(cols)),#
+        make.names(cols))#
+#
+    # create trees for each unique community wrt composition only#
+    P <- presence(x)#
+    phy <- extractTree(x)#
+    ids <- as.character(as.numeric(factor(sapply(P, paste,#
+        collapse=""))))#
+    subtrees <- lapply(P[!duplicated(ids)],#
+        function(n) subset(phy, rownames(P)[n %in% 1]))#
+    names(subtrees) <- ids[!duplicated(ids)]#
+#
+    res <- as(x, "phylo4com")#
+    res@subtrees <- subtrees#
+    res@metadata$comms[] <- ids#
+    return(res)#
+})#
+## older approach: create a single phylo4d object with all data in it#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    comm <- factor(communityID, levels=unique(communityID))#
+#    taxa <- factor(species)#
+#    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+#      dimnames=list(levels(taxa), unique(comm)))#
+#    dat[cbind(taxa, comm)] <- abundance#
+##
+#    subtree <- subset(tree, tips.include=levels(taxa))#
+##
+#    res <- addData(subtree, tip.data=dat, extra.data="OK")#
+#    res@metadata$comms <- make.names(unique(comm))#
+#    return(res)#
+##
+#}#
+#
+## similar to above, but cast function from reshape package#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    raw <- data.frame(.taxa=factor(species), .comm=factor(communityID),#
+#      value=abundance, stringsAsFactors=FALSE)#
+#    dat <- cast(.taxa ~ .comm, data=raw)#
+#    row.names(dat) <- dat[[1]]#
+#    dat <- dat[-1]#
+##
+#    subtree <- subset(tree, tips.include=row.names(dat))#
+##
+#    addData(subtree, tip.data=dat,#
+#      metadata=list(comms=make.names(colnames(dat))), extra.data="OK")#
+##
+#}#
+#
+##define a function called community.R#
+#
+# Generate site-by-species matrix#
+siteBySpecies <- function(phy, presence.only=FALSE,#
+    na.zero=FALSE, transpose=FALSE) {#
+#
+    if (presence.only) {#
+        dat <- presence(phy, na.zero=na.zero)#
+    } else {#
+        dat <- abundance(phy, na.zero=na.zero)#
+    }#
+    mat <- as.matrix(dat)#
+    if (!transpose) mat <- t(mat)#
+    return(mat)#
+#
+}#
+#
+##define simpson.R#
+#
+###
+## Simpson's index with and without phylogenetic distances#
+###
+#
+setGeneric("simpson",#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    standardGeneric("simpson")#
+})#
+#
+setMethod("simpson", signature(x="phylo4d"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    phyc <- phylo4com(x)#
+    simpson(phyc, method=method)#
+})#
+#
+setMethod("simpson", signature(x="phylo4com"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    method <- match.arg(method)#
+    N.relative <- prop.table(t(abundance(x)), 1)#
+    if (method=="phylogenetic") {#
+        dmat <- pairdist(x, type="tip")#
+    } else {#
+        dmat <- matrix(1, nTips(x), nTips(x))#
+        diag(dmat) <- 0#
+    }   #
+    out <- apply(N.relative, 1, function(n) sum((n %o% n)*dmat))#
+    return(out) #
+})#
+#
+## earlier version: works on a single phylo4d tree with abundance data#
+#simpson <- function(phy, method=c("traditional", "phylogenetic")) {#
+#  method <- match.arg(method)#
+#  x <- prop.table(abundance(phy))#
+#  if (method=="phylogenetic") {#
+#    dmat <- pairdist(phy, type="tip")#
+#  } else {#
+#    dmat <- matrix(1, nTips(phy), nTips(phy))#
+#    diag(dmat) <- 0#
+#  }   #
+#  sum((x %o% x) * dmat)#
+#}#
+#
+##define function they called pd.R, but call it pd_from_Cadotte.R#
+#
+###
+## PD methods#
+###
+#
+setGeneric("pd_from_Cadotte", function(x, ...) {#
+    standardGeneric("pd_from_Cadotte")#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4"),#
+  function(x, method=c("traditional")) {#
+    method <- match.arg(method)#
+    if (isRooted(x)) {#
+        nonroot.nodes <- setdiff(nodeId(x), rootNode(x))#
+        tot.length <- sum(edgeLength(x, nonroot.nodes))#
+    } else {#
+        tot.length <- sum(edgeLength(x))#
+    }#
+    return(tot.length)#
+  }#
+)#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4d"), function(x,#
+  method=c("traditional", "polytomy", "yule"), ...) {#
+    phyc <- phylo4com(x, ...)#
+    pd_from_Cadotte(phyc, method=method)#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4com"), function(x,#
+  method=c("traditional", "polytomy", "yule")) {#
+#
+    method <- match.arg(method)#
+#
+    if (method %in% c("polytomy", "yule")) {#
+        message("estimating minTL values from Supertree")#
+        res <- sapply(communities(x), function(community) {#
+            phyd <- phylo4d(x, community)#
+            n <- tipData(phyd)[[community]]#
+            pd_from_Cadotte(extractTree(weightByAbund(phyd, n, method)))#
+        })#
+    } else if (method == "traditional") {#
+        comms <- x@metadata$comms#
+        if (is.null(comms)) {#
+            return(.pd_from_Cadotte(extractTree(x), method))#
+        }#
+        subtrees <- x@subtrees[as.character(comms)]#
+        res <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+        names(res) <- names(comms)#
+    }#
+    return(res)#
+#
+})#
+#
+# lookup function for minimum tip length#
+getMinTL <- function(tree, genera) {#
+#
+  Supertree <- phylo4(Supertree)#
+#
+  if (missing(genera)) stop("must supply vector of genera")#
+#
+  # Families, Supertree, and LookupTL are all system data built into#
+  # the package#
+#
+  # Supplied tree must be ultrametric#
+# Not sure this is necessary?? Removing for now...#
+#  tree.phy <- suppressWarnings(as(foo, "phylo"))#
+#  if (!is.ultrametric(tree.phy)) {#
+#    stop(deparse(substitute(tree)), " is not ultrametric")#
+#  }#
+#
+  # TODO: if genus not in Families vector, need to give warning.#
+  families <- Families[genera]#
+#
+  # if Family is not in LookupTL give a warning, and later#
+  # use minTL based on average across all families in the lookup table#
+  if (!all(families %in% row.names(LookupTL))) {#
+    warning("one or more taxa missing from lookup table; using mean minTL")#
+  }#
+#
+  familiesInSupertree <- LookupTL[families, "supertree"]#
+  familiesInSupertree <- as.character(familiesInSupertree)#
+#
+  # Subset the supertree using families from the user-supplied tree. If#
+  # any user-supplied taxa cannot be matched to families in the#
+  # supertree, they are simply ignored#
+  subsupertree <- subset(Supertree, na.omit(familiesInSupertree))#
+  subsupertree.maxLength <- max(pairdist(subsupertree, type="tip"))/2#
+  tree.maxLength <- max(tipLength(tree, from="root"))#
+#
+  tableTL <- LookupTL[familiesInSupertree, "minTL"]#
+#
+  # if any TLs are 0 or NA, give warning and use average minTL across#
+  # all families in the LookupTL table#
+  if(any(tableTL==0 | is.na(tableTL))) {#
+    numNA <- sum(tableTL==0 | is.na(tableTL))#
+    warning("Using meanTL for ", numNA, " tip", if(numNA>1) "s") #
+    # calculate average minTL across the entire LookupTL table,#
+    # excluding any non-positive or NA values#
+    meanMinTL <- mean(LookupTL$minTL[LookupTL$minBL > 0], na.rm=TRUE)#
+    tableTL[is.na(tableTL)] <- meanMinTL  #
+    tableTL[tableTL<=0] <- meanMinTL  #
+  }#
+#
+  lookupTL <- tableTL * (tree.maxLength / subsupertree.maxLength)#
+  actualTL <- tipLength(tree, from="parent")#
+  minTL <- ifelse(lookupTL < actualTL, lookupTL, actualTL)#
+#
+  return(minTL)#
+}#
+#
+# function to weight tip length based on abundance#
+weightByAbund <- function(tree, n, method=c("polytomy", "yule")) {#
+#
+  method <- match.arg(method)#
+#
+  if (is.null(minTL(tree))) {#
+    minLength <- getMinTL(tree, genera(tree))#
+  } else {#
+    minLength <- minTL(tree)#
+  }#
+#
+  tipLen <- tipLength(tree)#
+#
+  if (method=="polytomy") {#
+    newLength <- tipLen + (n-1) * minLength#
+  } else if (method=="yule") {#
+    C <- 0.57722#
+    newLength <- tipLen - minLength +#
+      (minLength * (n-1) / (log(n) + C-1))#
+  }#
+#
+  # Note that this is (unfortunately) tightly coupled to the#
+  # implementation of phylo4 objects -- an assignment method would be#
+  # better#
+  tree@edge.length[getEdge(tree, nodeId(tree, "tip"))] <- newLength#
+#
+  return(tree)#
+#
+}#
+#
+##define a function called pae.R#
+#
+###
+## PAE methods#
+###
+#
+setGeneric("pae", function(x, na.rm=TRUE) {#
+    standardGeneric("pae")#
+})#
+#
+setMethod("pae", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    pae(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("pae", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    N <- abundance(x)#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+#
+    # now for each subtree...#
+    #PD <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+    PD <- pd_from_Cadotte(x)#
+    tmp <- setNames(rep(0, nTips(x)), tipLabels(x))#
+    TL <- lapply(subtrees, function(tree) {#
+        res <- tipLength(tree)#
+        tmp[match(names(res), names(tmp))] <- res#
+        tmp#
+    })#
+    TL <- do.call("cbind", TL[as.character(comms)])#
+#
+    numer <- PD + colSums(TL * (N - 1))#
+    denom <- PD + (colSums(N, na.rm = na.rm) / colSums(presence(x),#
+        na.rm=na.rm) - 1) * colSums(TL)#
+    res <- numer/denom#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+##define a function called iac.R#
+#
+###
+## IAC methods#
+###
+#
+setGeneric("iac", function(x, na.rm=TRUE) {#
+    standardGeneric("iac")#
+})#
+#
+setMethod("iac", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    iac(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("iac", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .denom <-  function(tree, template) {#
+        # Count number of lineages originating at each internal node#
+        # (i.e. number of splits)#
+        int.nodes <- nodeId(tree, "internal")#
+        nSplits <- sapply(int.nodes, function(x) length(children(tree,#
+            x)))#
+        names(nSplits) <- int.nodes#
+        # For each tip, take the product of the number of splits across#
+        # all of its ancestral nodes#
+        res <- sapply(ancestors(tree, tipLabels(tree)), function(x)#
+            prod(nSplits[as.character(x)]))#
+        template[match(names(res), names(template))] <- res#
+        template#
+    }#
+#
+    # now for each subtree...#
+    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+    denom <- lapply(subtrees, .denom, tmp)#
+    denom <- do.call("cbind", denom[as.character(comms)])#
+    nnodes <- sapply(x@subtrees, nNodes)[as.character(comms)]#
+#
+    # Calculate expected number of individuals under null hypothesis#
+    # of equal allocation to each lineage at each (node) split #
+    N <- abundance(x)#
+    expected <- t(colSums(N, na.rm=na.rm) / t(denom))#
+#
+    # IAC: summed absolute difference between expected and observed#
+    # abundances, divided by number of nodes#
+    colSums(abs(expected - N), na.rm=na.rm) / nnodes#
+#
+})#
+#
+##define a function called aed.R#
+#
+###
+## ED and related methods#
+###
+#
+setGeneric("ed", function(x, na.rm=TRUE) {#
+    standardGeneric("ed")#
+})#
+#
+setMethod("ed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    ed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("ed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .edi <- function(tree) {#
+        # set length of root edge to zero#
+        edgeLength(tree)[edgeId(tree, "root")] <- 0#
+#
+        all.nodes <- nodeId(tree, type = "all")#
+        des <- descendants(tree, all.nodes, type="tips")#
+        nv <- edgeLength(tree, all.nodes) / sapply(des, length)#
+        names(nv) <- all.nodes#
+#
+        tip.nodes <- nodeId(tree, "tip")#
+        anc <- ancestors(tree, tip.nodes, "ALL")#
+#
+        res <- sapply(anc, function(n) sum(nv[as.character(n)], na.rm=TRUE))#
+        names(res) <- tipLabels(tree)#
+        res#
+    }#
+    res <- lapply(subtrees, .edi)[as.character(comms)]#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+setGeneric("hed", function(x, na.rm=TRUE) {#
+    standardGeneric("hed")#
+})#
+#
+setMethod("hed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    hed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("hed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    ED <- ed(x)#
+    PD <- pd_from_Cadotte(x)#
+    res <- sapply(seq_len(length(PD)), function(i) {#
+        scaledED <- ED[[i]] / PD[[i]]#
+        -sum(scaledED * log(scaledED))#
+    })#
+    names(res) <- names(PD)#
+    return(res)#
+})#
+#
+setGeneric("eed", function(x, na.rm=TRUE) {#
+    standardGeneric("eed")#
+})#
+#
+setMethod("eed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    hed(x) / log(sapply(subtrees, nTips)[as.character(comms)])#
+})#
+#
+setGeneric("aed", function(x, na.rm=TRUE) {#
+    standardGeneric("aed")#
+})#
+#
+setMethod("aed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    aed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("aed", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .isD <- function(tree) {#
+        # get all node IDs, but excluding root node#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        # Create logical matrix indicating which tips (in columns) are#
+        # descendants of each node (in rows), self-inclusive#
+        t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+            function(n) nonroot.nodes %in% n))#
+    }#
+#
+    .elen <- function(tree) {#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        edgeLength(tree, nonroot.nodes)#
+    }#
+    isDescendant <- lapply(subtrees, .isD)[as.character(comms)]#
+    edge.length <- lapply(subtrees, .elen)[as.character(comms)]#
+    N <- abundance(x)#
+#
+    res <- lapply(seq_along(N), function(i) {#
+        spp <- row.names(isDescendant[[i]])        #
+        dAbund <- N[spp, i] * isDescendant[[i]]#
+#
+        # Calculate individual-based AED of each species#
+        AED <- colSums(edge.length[[i]] * t(prop.table(dAbund, margin=2)))#
+        AED/N[spp, i]#
+    })#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+#    .isD <- function(tree, template) {#
+#        # get all node IDs, but excluding root node#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        # Create logical matrix indicating which tips (in columns) are#
+#        # descendants of each node (in rows), self-inclusive#
+#        res <- t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+#          function(n) nonroot.nodes %in% n))#
+#        template[match(rownames(res), rownames(template)), ] <- res#
+#        template#
+#    }#
+##
+#    .el <- function(tree) {#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        edgeLength(tree, nonroot.nodes)#
+#    }#
+#    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+#    tmp <- matrix(NA, nrow=nTips(x), ncol=nNodes(x)+nTips(x)-1)#
+#    rownames(tmp) <- tipLabels(x)#
+#    isDescendant <- lapply(subtrees, .isD, tmp)#
+#    isDescendant <- array(unlist(isDescendant), dim=c(nTips(x),#
+#        nTips(x)+nNodes(x)-1, length(subtrees)))#
+##
+#    # Create vector of ancestral edge lengths#
+#    edge.length <- sapply(subtrees, .elen)#
+##
+#    # Create matrix containing number of individuals of each species#
+#    # descending from each interior node#
+#    N <- as.matrix(abundance(x))#
+#    dAbund <- sweep(isDescendant, c(1,3), N, "*")#
+##
+#    # Calculate individual-based AED of each species#
+#    pt <- prop.table(dAbund, margin=c(2,3))#
+#    AED <- sweep(pt, c(2,3), edge.length, "*")#
+#    AED <- apply(AED, 3, rowSums) / N#
+##
+#    return(AED)#
+#
+setGeneric("haed", function(x, na.rm=TRUE) {#
+    standardGeneric("haed")#
+})#
+#
+setMethod("haed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    haed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("haed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    # Recast AED in terms of individuals#
+    AED <- aed(x)#
+    PD <- pd_from_Cadotte(x)#
+    N <- abundance(x)#
+    scaled.AED <- lapply(seq_along(N), function(i) {#
+        spp <- names(AED[[i]])        #
+        rep(unname(AED[[i]]), N[spp, i]) / PD[[i]]#
+    })#
+    res <- sapply(scaled.AED, function(x) -sum(x * log(x)))#
+    names(res) <- names(AED)#
+    return(res)#
+})#
+#
+setGeneric("eaed", function(x, na.rm=TRUE) {#
+    standardGeneric("eaed")#
+})#
+#
+setMethod("eaed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eaed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eaed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+  haed(x) / log(colSums(abundance(x)))#
+})#
+#
+setGeneric("value",#
+  function(x, na.rm=TRUE) {#
+    standardGeneric("value")#
+})#
+#
+setMethod("value", signature(x="phylo4d"),#
+  function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    value(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("value", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+    AED <- aed(x)#
+    lapply(AED, function(x) x/sum(x))#
+})#
+#
+##now write functions to get the various data sets and formats into order#
+##phylo4com takes an x = phylo, n = abundance matrix with species as rows and sites as columns
+library(picante)
+phylo
+data(phylocom)
+phylo <- phylocom$phylo
+cdm <- phylocom$sample
+cdm
+library(picante)#
+#
+data(phylocom)#
+#
+phylo <- phylocom$phylo#
+#
+picante_cdm <- phylocom$sample#
+#
+spacodiR_cdm <- t(picante_cdm)
+ecoPD_cdm <- phylo4com(phylo, spacodiRcdm)
+ecoPD_cdm <- phylo4com(phylo, spacodiR_cdm)
+ecoPD_cdm
+?aed
+?ed
+library(ecoPD)
+library(picante)
+library(ecoPD)
+data(phylocom)#
+#
+phylo <- phylocom$phylo#
+#
+picante_cdm <- phylocom$sample ##sites are rows, species are columns#
+#
+spacodiR_cdm <- t(picante_cdm) ##species are rows, sites are columns#
+#
+ecoPD_cdm <- phylo4com(phylo, spacodiR_cdm)
+?aed
+?pae
+?ed
+?iac
+pae_test <- pae(ecoPD_cdm)#
+#
+aed_test <- aed(ecoPD_cdm)#
+#
+ed_test <- ed(ecoPD_cdm)#
+#
+eed_test <- eed(ecoPD_cdm)#
+#
+hed_test <- hed(ecoPD_cdm)#
+#
+eaed_test <- eaed(ecoPD_cdm)#
+#
+haed_test <- haed(ecoPD_cdm)#
+#
+iac_test <- iac(ecoPD_cdm)
+this script is to be used for calculating all metrics of interest for our simulation study#
+##because ecoPD turns out to be uninstallable from CRAN repositories, it's probably a wise choice#
+##to install all functions manually, rather than have to figure out how to get it installed#
+##an additional benefit of this is that we can easily rename a function they called pd, but#
+##that would conflict with picante, especially if we called that package first#
+#
+##first load the packages ecoPD depends on#
+#
+library(phylobase)#
+library(grid)#
+library(Rcpp)#
+#
+##define the function called utilities.R#
+#
+# internal function to compute distances from one node to all others#
+# NOTE: assumes node IDs are always 1:n (currently true of phylo4 objs)#
+dijkstra <- function(phy, node) {#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- rep(Inf, length=n)#
+  names(d) <- nodes#
+  d[node] <- 0#
+  while (length(nodes)>0) {#
+    u <- nodes[which.min(d[nodes])[[1]]]#
+    if (is.infinite(d[u])) break#
+    nodes <- nodes[-match(u, nodes)]#
+    anc <- edge[edge[,2]==u,1]#
+    for (parent in anc[anc %in% nodes]) {#
+      alt <- d[u] + elen[paste(parent, u, sep="-")]#
+      if (alt < d[parent]) {#
+        d[parent] <- alt#
+      }#
+    }#
+    des <- edge[edge[,1]==u,2]#
+    for (child in des[des %in% nodes]) {#
+      alt <- d[u] + elen[paste(u, child, sep="-")]#
+      if (alt < d[child]) {#
+        d[child] <- alt#
+      }#
+    }#
+  }#
+  d#
+}#
+#
+# tip length extractor#
+tipLength <- function(phy, from=c("parent", "root")) {#
+  from <- match.arg(from)#
+  tips <- nodeId(phy, type="tip")#
+  if (from=="parent") {#
+    len <- edgeLength(phy, tips)#
+  } else if (from=="root") {#
+    len <- dijkstra(phy, rootNode(phy))#
+    len <- len[match(tips, names(len))]#
+  }#
+  names(len) <- tipLabels(phy)#
+  return(len)#
+}#
+#
+# abundance extractor#
+abundance <- function(phy, comm, tip, na.zero=FALSE) {#
+    communities <- names(phy@metadata$comms)#
+    if (missing(comm)) {#
+        comm <- communities#
+    }#
+    doNotExist <- !comm %in% communities#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in phy: ",#
+            paste(comm[doNotExist], collapse=", "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- getNode(phy, tip, type="tip", missing="warn")#
+        tip <- names(tip)[!is.na(tip)]#
+    }#
+    N <- tipData(phy)[tip, comm, drop=FALSE]#
+    if (na.zero) N[is.na(N)] <- 0#
+    return(N)#
+}#
+#
+# abundance assignment function#
+`abundance<-` <- function(phy, comm, tip, value) {#
+    if (!is.atomic(comm) || length(comm)!=1) {#
+        stop("when replacing, comm must be a vector of length 1")#
+    } else if (!comm %in% names(phy@metadata$comms)) {#
+        stop(paste("community", comm, "not found in phy", sep=" "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- names(getNode(phy, tip, type="tip", missing="fail"))#
+    }#
+    tipData(phy)[tip, comm] <- value#
+    return(phy)#
+}#
+#
+presence <- function(phy, comm, tip, na.zero=FALSE) {#
+    N <- abundance(phy, comm, tip, na.zero=na.zero)#
+    N[N > 0] <- 1#
+    N[N <= 0] <- 0#
+    N#
+}#
+#
+richness <- function(phy, comm, na.zero=FALSE) {#
+    P <- presence(phy, comm, na.zero=na.zero)#
+    colSums(P)#
+}#
+#
+# minTL extractor#
+minTL <- function(phy) {#
+  minTL <- tipData(phy)$minTL#
+  if (!is.null(minTL)) {#
+    names(minTL) <- row.names(tipData(phy))#
+  }#
+  return(minTL)#
+}#
+#
+# Note: function assumes values are in nodeId(phy, "tip") order#
+# minTL assignment function#
+`minTL<-` <- function(phy, value) {#
+  if (!is.numeric(value)) {#
+    stop("minTL values must be a numeric vector")#
+  } else if (length(value)!=nTips(phy)) {#
+    stop("number of minTL values must equal number of species")#
+  }#
+  tipData(phy)[["minTL"]] <- value#
+  return(phy)#
+}#
+#
+# community labels extractor#
+communities <- function(x) {#
+  names(x@metadata$comms)#
+}#
+#
+## this works as implementation of dist.nodes for phylo4 objects, albeit#
+## about 1.5x slower than dist.nodes#
+pairdist <- function(phy, type=c("all", "tip"), use.labels=FALSE) {#
+#
+  if (hasPoly(phy) || hasRetic(phy)) {#
+    stop("pairdist can't currently handle polytomies or reticulation")#
+  }#
+#
+  type <- match.arg(type)#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  elen <- elen[!names(elen) %in% edgeId(phy, "root")]#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- matrix(NA_real_, nrow=n, ncol=n)#
+  diag(d) <- 0#
+  d[edge] <- d[edge[,2:1]] <- elen#
+  ntips <- nTips(phy)#
+  tips <- nodeId(phy, "tip")#
+  tip.parents <- sapply(tips, function(n) edge[edge[,2]==n, 1])#
+  nodes.todo <- tip.parents[duplicated(tip.parents)]#
+  done <- tips#
+  root <- if (isRooted(phy)) rootNode(phy) else ntips+1#
+  descendants <- matrix(edge[order(edge[,1]),2], nrow=2)#
+  ancestors <- edge[match(nodes, edge[,2]), 1]#
+#
+  while(length(nodes.todo)>0) {#
+    nod <- nodes.todo[1]#
+    if (nod==root && length(nodes.todo)>1) {#
+      nod <- nodes.todo[2]#
+    }#
+    des1 <- descendants[1, nod-ntips]#
+    des2 <- descendants[2, nod-ntips]#
+    if (des1>ntips) des1 <- which(!is.na(d[des1, ]))#
+    if (des2>ntips) des2 <- which(!is.na(d[des2, ]))#
+    for (y in des1) {#
+      d[y, des2] <- d[des2, y] <- d[nod, y] + d[nod, des2]#
+    }#
+    if (nod!=root) {#
+      anc <- ancestors[nod]#
+      l <- elen[paste(anc, nod, sep="-")]#
+      d[des2, anc] <- d[anc, des2] <- d[nod, des2] + l#
+      d[des1, anc] <- d[anc, des1] <- d[nod, des1] + l#
+      done <- c(done, nod)#
+      if (all(descendants[, anc-ntips] %in% done)) {#
+        nodes.todo <- c(nodes.todo, anc)#
+      }#
+    }#
+    nodes.todo <- nodes.todo[nod!=nodes.todo]#
+  }#
+#
+  if (type=="tip") {#
+    d <- d[1:ntips, 1:ntips]#
+  }#
+#
+  if (use.labels) {#
+    rownames(d) <- colnames(d) <- unname(labels(phy, type=type))#
+  } else {#
+    rownames(d) <- colnames(d) <- nodeId(phy, type=type)#
+  }#
+#
+  return(d)#
+}#
+#
+##define a function called coerce.R#
+#
+setMethod("phylo4d", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4d"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+#
+    ## get the tree#
+    tree <- phylo4(x, community)#
+#
+    ## get abundance values, and drop species with zero abundance#
+    N <- abundance(x, community)#
+    N <- N[N[[community]]!=0, , drop=FALSE]#
+#
+    ## combine and return phylo4d object#
+    phylo4d(tree, tip.data=N)#
+})#
+#
+setMethod("phylo4", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+    getSubtrees(x, community)[[1]]#
+})#
+#
+## internal helper function for extracting a list of the subtrees#
+## associated with each communities#
+getSubtrees <- function(x, community) {#
+    communities <- x@metadata$comms#
+    if (missing(community)) {#
+        community <- names(communities)#
+    }#
+    doNotExist <- !community %in% names(communities)#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in x: ",#
+            paste(community[doNotExist], collapse=", "))#
+    }#
+    res <- x@subtrees[communities[names(communities) %in% community]]#
+    names(res) <- community#
+    return(res)#
+}#
+##define phylo4com.R#
+#
+setClass("phylo4com",#
+    representation(subtrees="list"),#
+    prototype = list(subtrees = list()),#
+    validity = checkPhylo4,#
+    contains="phylo4d")#
+#
+## create single tree with all data in it, plus a list of subtrees (sans#
+## data) for each unique species composition#
+setGeneric("phylo4com", function(x, n, ...) {#
+    standardGeneric("phylo4com")#
+})#
+#
+setMethod("phylo4com", c("phylo", "ANY"),#
+  function(x, n, ..., check.node.labels="keep") {#
+    x <- phylo4(x, check.node.labels)#
+    phylo4com(x, n, ...)#
+})#
+#
+setMethod("phylo4com", c("phylo4", "numeric"),#
+  function(x, n, communityID, species,#
+    missing=c("warn", "OK", "fail")) {#
+#
+    ## create site-by-species abundance matrix#
+    comm <- factor(communityID, levels=unique(communityID))#
+    taxa <- factor(species)#
+    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+        dimnames=list(levels(taxa), unique(comm)))#
+    dat[cbind(taxa, comm)] <- n#
+#
+    ## hand off to the phylo4com matrix method#
+    phylo4com(x, dat, missing)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "matrix"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+#
+    taxa <- rownames(n)#
+    if (any(duplicated(taxa))) {#
+        stop("duplicated taxa are not permitted")#
+    }#
+    comm <- colnames(n)#
+    if (any(duplicated(comm))) {#
+        stop("duplicated community IDs are not permitted")#
+    }#
+#
+    phy <- subset(x, tips.include=taxa)#
+    phyd <- addData(phy, tip.data=n, extra.data="OK")#
+    phylo4com(phyd, cols=comm)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "data.frame"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+    n <- as.matrix(n)#
+    phylo4com(x, n, missing)#
+})#
+#
+setMethod("phylo4com", c("phylo4d", "missing"),#
+  function(x, n, cols) {#
+#
+    if (missing(cols)) {#
+        cols <- names(tipData(x))#
+    }#
+    if (is.null(cols)) {#
+        res <- as(x, "phylo4com")#
+        res@metadata$comms <- NULL#
+        return(res)#
+    }#
+    x@metadata$comms <- setNames(rep(NA, length(cols)),#
+        make.names(cols))#
+#
+    # create trees for each unique community wrt composition only#
+    P <- presence(x)#
+    phy <- extractTree(x)#
+    ids <- as.character(as.numeric(factor(sapply(P, paste,#
+        collapse=""))))#
+    subtrees <- lapply(P[!duplicated(ids)],#
+        function(n) subset(phy, rownames(P)[n %in% 1]))#
+    names(subtrees) <- ids[!duplicated(ids)]#
+#
+    res <- as(x, "phylo4com")#
+    res@subtrees <- subtrees#
+    res@metadata$comms[] <- ids#
+    return(res)#
+})#
+## older approach: create a single phylo4d object with all data in it#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    comm <- factor(communityID, levels=unique(communityID))#
+#    taxa <- factor(species)#
+#    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+#      dimnames=list(levels(taxa), unique(comm)))#
+#    dat[cbind(taxa, comm)] <- abundance#
+##
+#    subtree <- subset(tree, tips.include=levels(taxa))#
+##
+#    res <- addData(subtree, tip.data=dat, extra.data="OK")#
+#    res@metadata$comms <- make.names(unique(comm))#
+#    return(res)#
+##
+#}#
+#
+## similar to above, but cast function from reshape package#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    raw <- data.frame(.taxa=factor(species), .comm=factor(communityID),#
+#      value=abundance, stringsAsFactors=FALSE)#
+#    dat <- cast(.taxa ~ .comm, data=raw)#
+#    row.names(dat) <- dat[[1]]#
+#    dat <- dat[-1]#
+##
+#    subtree <- subset(tree, tips.include=row.names(dat))#
+##
+#    addData(subtree, tip.data=dat,#
+#      metadata=list(comms=make.names(colnames(dat))), extra.data="OK")#
+##
+#}#
+#
+##define a function called community.R#
+#
+# Generate site-by-species matrix#
+siteBySpecies <- function(phy, presence.only=FALSE,#
+    na.zero=FALSE, transpose=FALSE) {#
+#
+    if (presence.only) {#
+        dat <- presence(phy, na.zero=na.zero)#
+    } else {#
+        dat <- abundance(phy, na.zero=na.zero)#
+    }#
+    mat <- as.matrix(dat)#
+    if (!transpose) mat <- t(mat)#
+    return(mat)#
+#
+}#
+#
+##define simpson.R#
+#
+###
+## Simpson's index with and without phylogenetic distances#
+###
+#
+setGeneric("simpson",#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    standardGeneric("simpson")#
+})#
+#
+setMethod("simpson", signature(x="phylo4d"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    phyc <- phylo4com(x)#
+    simpson(phyc, method=method)#
+})#
+#
+setMethod("simpson", signature(x="phylo4com"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    method <- match.arg(method)#
+    N.relative <- prop.table(t(abundance(x)), 1)#
+    if (method=="phylogenetic") {#
+        dmat <- pairdist(x, type="tip")#
+    } else {#
+        dmat <- matrix(1, nTips(x), nTips(x))#
+        diag(dmat) <- 0#
+    }   #
+    out <- apply(N.relative, 1, function(n) sum((n %o% n)*dmat))#
+    return(out) #
+})#
+#
+## earlier version: works on a single phylo4d tree with abundance data#
+#simpson <- function(phy, method=c("traditional", "phylogenetic")) {#
+#  method <- match.arg(method)#
+#  x <- prop.table(abundance(phy))#
+#  if (method=="phylogenetic") {#
+#    dmat <- pairdist(phy, type="tip")#
+#  } else {#
+#    dmat <- matrix(1, nTips(phy), nTips(phy))#
+#    diag(dmat) <- 0#
+#  }   #
+#  sum((x %o% x) * dmat)#
+#}#
+#
+##define function they called pd.R, but call it pd_from_Cadotte.R. #
+##i carefully replaced all instances of the use of function pd() with this.#
+##hopefully it works, since pd is in picante#
+#
+###
+## PD methods#
+###
+#
+setGeneric("pd_from_Cadotte", function(x, ...) {#
+    standardGeneric("pd_from_Cadotte")#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4"),#
+  function(x, method=c("traditional")) {#
+    method <- match.arg(method)#
+    if (isRooted(x)) {#
+        nonroot.nodes <- setdiff(nodeId(x), rootNode(x))#
+        tot.length <- sum(edgeLength(x, nonroot.nodes))#
+    } else {#
+        tot.length <- sum(edgeLength(x))#
+    }#
+    return(tot.length)#
+  }#
+)#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4d"), function(x,#
+  method=c("traditional", "polytomy", "yule"), ...) {#
+    phyc <- phylo4com(x, ...)#
+    pd_from_Cadotte(phyc, method=method)#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4com"), function(x,#
+  method=c("traditional", "polytomy", "yule")) {#
+#
+    method <- match.arg(method)#
+#
+    if (method %in% c("polytomy", "yule")) {#
+        message("estimating minTL values from Supertree")#
+        res <- sapply(communities(x), function(community) {#
+            phyd <- phylo4d(x, community)#
+            n <- tipData(phyd)[[community]]#
+            pd_from_Cadotte(extractTree(weightByAbund(phyd, n, method)))#
+        })#
+    } else if (method == "traditional") {#
+        comms <- x@metadata$comms#
+        if (is.null(comms)) {#
+            return(.pd_from_Cadotte(extractTree(x), method))#
+        }#
+        subtrees <- x@subtrees[as.character(comms)]#
+        res <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+        names(res) <- names(comms)#
+    }#
+    return(res)#
+#
+})#
+#
+# lookup function for minimum tip length#
+getMinTL <- function(tree, genera) {#
+#
+  Supertree <- phylo4(Supertree)#
+#
+  if (missing(genera)) stop("must supply vector of genera")#
+#
+  # Families, Supertree, and LookupTL are all system data built into#
+  # the package#
+#
+  # Supplied tree must be ultrametric#
+# Not sure this is necessary?? Removing for now...#
+#  tree.phy <- suppressWarnings(as(foo, "phylo"))#
+#  if (!is.ultrametric(tree.phy)) {#
+#    stop(deparse(substitute(tree)), " is not ultrametric")#
+#  }#
+#
+  # TODO: if genus not in Families vector, need to give warning.#
+  families <- Families[genera]#
+#
+  # if Family is not in LookupTL give a warning, and later#
+  # use minTL based on average across all families in the lookup table#
+  if (!all(families %in% row.names(LookupTL))) {#
+    warning("one or more taxa missing from lookup table; using mean minTL")#
+  }#
+#
+  familiesInSupertree <- LookupTL[families, "supertree"]#
+  familiesInSupertree <- as.character(familiesInSupertree)#
+#
+  # Subset the supertree using families from the user-supplied tree. If#
+  # any user-supplied taxa cannot be matched to families in the#
+  # supertree, they are simply ignored#
+  subsupertree <- subset(Supertree, na.omit(familiesInSupertree))#
+  subsupertree.maxLength <- max(pairdist(subsupertree, type="tip"))/2#
+  tree.maxLength <- max(tipLength(tree, from="root"))#
+#
+  tableTL <- LookupTL[familiesInSupertree, "minTL"]#
+#
+  # if any TLs are 0 or NA, give warning and use average minTL across#
+  # all families in the LookupTL table#
+  if(any(tableTL==0 | is.na(tableTL))) {#
+    numNA <- sum(tableTL==0 | is.na(tableTL))#
+    warning("Using meanTL for ", numNA, " tip", if(numNA>1) "s") #
+    # calculate average minTL across the entire LookupTL table,#
+    # excluding any non-positive or NA values#
+    meanMinTL <- mean(LookupTL$minTL[LookupTL$minBL > 0], na.rm=TRUE)#
+    tableTL[is.na(tableTL)] <- meanMinTL  #
+    tableTL[tableTL<=0] <- meanMinTL  #
+  }#
+#
+  lookupTL <- tableTL * (tree.maxLength / subsupertree.maxLength)#
+  actualTL <- tipLength(tree, from="parent")#
+  minTL <- ifelse(lookupTL < actualTL, lookupTL, actualTL)#
+#
+  return(minTL)#
+}#
+#
+# function to weight tip length based on abundance#
+weightByAbund <- function(tree, n, method=c("polytomy", "yule")) {#
+#
+  method <- match.arg(method)#
+#
+  if (is.null(minTL(tree))) {#
+    minLength <- getMinTL(tree, genera(tree))#
+  } else {#
+    minLength <- minTL(tree)#
+  }#
+#
+  tipLen <- tipLength(tree)#
+#
+  if (method=="polytomy") {#
+    newLength <- tipLen + (n-1) * minLength#
+  } else if (method=="yule") {#
+    C <- 0.57722#
+    newLength <- tipLen - minLength +#
+      (minLength * (n-1) / (log(n) + C-1))#
+  }#
+#
+  # Note that this is (unfortunately) tightly coupled to the#
+  # implementation of phylo4 objects -- an assignment method would be#
+  # better#
+  tree@edge.length[getEdge(tree, nodeId(tree, "tip"))] <- newLength#
+#
+  return(tree)#
+#
+}#
+#
+##define a function called pae.R#
+#
+###
+## PAE methods#
+###
+#
+setGeneric("pae", function(x, na.rm=TRUE) {#
+    standardGeneric("pae")#
+})#
+#
+setMethod("pae", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    pae(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("pae", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    N <- abundance(x)#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+#
+    # now for each subtree...#
+    #PD <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+    PD <- pd_from_Cadotte(x)#
+    tmp <- setNames(rep(0, nTips(x)), tipLabels(x))#
+    TL <- lapply(subtrees, function(tree) {#
+        res <- tipLength(tree)#
+        tmp[match(names(res), names(tmp))] <- res#
+        tmp#
+    })#
+    TL <- do.call("cbind", TL[as.character(comms)])#
+#
+    numer <- PD + colSums(TL * (N - 1))#
+    denom <- PD + (colSums(N, na.rm = na.rm) / colSums(presence(x),#
+        na.rm=na.rm) - 1) * colSums(TL)#
+    res <- numer/denom#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+##define a function called iac.R#
+#
+###
+## IAC methods#
+###
+#
+setGeneric("iac", function(x, na.rm=TRUE) {#
+    standardGeneric("iac")#
+})#
+#
+setMethod("iac", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    iac(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("iac", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .denom <-  function(tree, template) {#
+        # Count number of lineages originating at each internal node#
+        # (i.e. number of splits)#
+        int.nodes <- nodeId(tree, "internal")#
+        nSplits <- sapply(int.nodes, function(x) length(children(tree,#
+            x)))#
+        names(nSplits) <- int.nodes#
+        # For each tip, take the product of the number of splits across#
+        # all of its ancestral nodes#
+        res <- sapply(ancestors(tree, tipLabels(tree)), function(x)#
+            prod(nSplits[as.character(x)]))#
+        template[match(names(res), names(template))] <- res#
+        template#
+    }#
+#
+    # now for each subtree...#
+    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+    denom <- lapply(subtrees, .denom, tmp)#
+    denom <- do.call("cbind", denom[as.character(comms)])#
+    nnodes <- sapply(x@subtrees, nNodes)[as.character(comms)]#
+#
+    # Calculate expected number of individuals under null hypothesis#
+    # of equal allocation to each lineage at each (node) split #
+    N <- abundance(x)#
+    expected <- t(colSums(N, na.rm=na.rm) / t(denom))#
+#
+    # IAC: summed absolute difference between expected and observed#
+    # abundances, divided by number of nodes#
+    colSums(abs(expected - N), na.rm=na.rm) / nnodes#
+#
+})#
+#
+##define a function called aed.R#
+#
+###
+## ED and related methods#
+###
+#
+setGeneric("ed", function(x, na.rm=TRUE) {#
+    standardGeneric("ed")#
+})#
+#
+setMethod("ed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    ed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("ed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .edi <- function(tree) {#
+        # set length of root edge to zero#
+        edgeLength(tree)[edgeId(tree, "root")] <- 0#
+#
+        all.nodes <- nodeId(tree, type = "all")#
+        des <- descendants(tree, all.nodes, type="tips")#
+        nv <- edgeLength(tree, all.nodes) / sapply(des, length)#
+        names(nv) <- all.nodes#
+#
+        tip.nodes <- nodeId(tree, "tip")#
+        anc <- ancestors(tree, tip.nodes, "ALL")#
+#
+        res <- sapply(anc, function(n) sum(nv[as.character(n)], na.rm=TRUE))#
+        names(res) <- tipLabels(tree)#
+        res#
+    }#
+    res <- lapply(subtrees, .edi)[as.character(comms)]#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+setGeneric("hed", function(x, na.rm=TRUE) {#
+    standardGeneric("hed")#
+})#
+#
+setMethod("hed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    hed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("hed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    ED <- ed(x)#
+    PD <- pd_from_Cadotte(x)#
+    res <- sapply(seq_len(length(PD)), function(i) {#
+        scaledED <- ED[[i]] / PD[[i]]#
+        -sum(scaledED * log(scaledED))#
+    })#
+    names(res) <- names(PD)#
+    return(res)#
+})#
+#
+setGeneric("eed", function(x, na.rm=TRUE) {#
+    standardGeneric("eed")#
+})#
+#
+setMethod("eed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    hed(x) / log(sapply(subtrees, nTips)[as.character(comms)])#
+})#
+#
+setGeneric("aed", function(x, na.rm=TRUE) {#
+    standardGeneric("aed")#
+})#
+#
+setMethod("aed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    aed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("aed", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .isD <- function(tree) {#
+        # get all node IDs, but excluding root node#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        # Create logical matrix indicating which tips (in columns) are#
+        # descendants of each node (in rows), self-inclusive#
+        t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+            function(n) nonroot.nodes %in% n))#
+    }#
+#
+    .elen <- function(tree) {#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        edgeLength(tree, nonroot.nodes)#
+    }#
+    isDescendant <- lapply(subtrees, .isD)[as.character(comms)]#
+    edge.length <- lapply(subtrees, .elen)[as.character(comms)]#
+    N <- abundance(x)#
+#
+    res <- lapply(seq_along(N), function(i) {#
+        spp <- row.names(isDescendant[[i]])        #
+        dAbund <- N[spp, i] * isDescendant[[i]]#
+#
+        # Calculate individual-based AED of each species#
+        AED <- colSums(edge.length[[i]] * t(prop.table(dAbund, margin=2)))#
+        AED/N[spp, i]#
+    })#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+#    .isD <- function(tree, template) {#
+#        # get all node IDs, but excluding root node#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        # Create logical matrix indicating which tips (in columns) are#
+#        # descendants of each node (in rows), self-inclusive#
+#        res <- t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+#          function(n) nonroot.nodes %in% n))#
+#        template[match(rownames(res), rownames(template)), ] <- res#
+#        template#
+#    }#
+##
+#    .el <- function(tree) {#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        edgeLength(tree, nonroot.nodes)#
+#    }#
+#    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+#    tmp <- matrix(NA, nrow=nTips(x), ncol=nNodes(x)+nTips(x)-1)#
+#    rownames(tmp) <- tipLabels(x)#
+#    isDescendant <- lapply(subtrees, .isD, tmp)#
+#    isDescendant <- array(unlist(isDescendant), dim=c(nTips(x),#
+#        nTips(x)+nNodes(x)-1, length(subtrees)))#
+##
+#    # Create vector of ancestral edge lengths#
+#    edge.length <- sapply(subtrees, .elen)#
+##
+#    # Create matrix containing number of individuals of each species#
+#    # descending from each interior node#
+#    N <- as.matrix(abundance(x))#
+#    dAbund <- sweep(isDescendant, c(1,3), N, "*")#
+##
+#    # Calculate individual-based AED of each species#
+#    pt <- prop.table(dAbund, margin=c(2,3))#
+#    AED <- sweep(pt, c(2,3), edge.length, "*")#
+#    AED <- apply(AED, 3, rowSums) / N#
+##
+#    return(AED)#
+#
+setGeneric("haed", function(x, na.rm=TRUE) {#
+    standardGeneric("haed")#
+})#
+#
+setMethod("haed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    haed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("haed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    # Recast AED in terms of individuals#
+    AED <- aed(x)#
+    PD <- pd_from_Cadotte(x)#
+    N <- abundance(x)#
+    scaled.AED <- lapply(seq_along(N), function(i) {#
+        spp <- names(AED[[i]])        #
+        rep(unname(AED[[i]]), N[spp, i]) / PD[[i]]#
+    })#
+    res <- sapply(scaled.AED, function(x) -sum(x * log(x)))#
+    names(res) <- names(AED)#
+    return(res)#
+})#
+#
+setGeneric("eaed", function(x, na.rm=TRUE) {#
+    standardGeneric("eaed")#
+})#
+#
+setMethod("eaed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eaed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eaed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+  haed(x) / log(colSums(abundance(x)))#
+})#
+#
+setGeneric("value",#
+  function(x, na.rm=TRUE) {#
+    standardGeneric("value")#
+})#
+#
+setMethod("value", signature(x="phylo4d"),#
+  function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    value(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("value", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+    AED <- aed(x)#
+    lapply(AED, function(x) x/sum(x))#
+})#
+#
+##now write functions to get the various data sets and formats into order#
+##phylo4com takes an x = phylo, n = abundance matrix with species as rows and sites as columns#
+##take the following lines of code out after you have a real community data matrix (cdm)#
+##and phylogeny going into it. these are just for practice#
+#
+library(picante)#
+#
+data(phylocom)#
+#
+phylo <- phylocom$phylo#
+#
+picante_cdm <- phylocom$sample ##sites are rows, species are columns#
+#
+spacodiR_cdm <- t(picante_cdm) ##species are rows, sites are columns#
+#
+ecoPD_cdm <- phylo4com(phylo, spacodiR_cdm)#
+#
+pae_test <- pae(ecoPD_cdm)#
+#
+aed_test <- aed(ecoPD_cdm)#
+#
+ed_test <- ed(ecoPD_cdm)#
+#
+eed_test <- eed(ecoPD_cdm)#
+#
+hed_test <- hed(ecoPD_cdm)#
+#
+eaed_test <- eaed(ecoPD_cdm)#
+#
+haed_test <- haed(ecoPD_cdm)#
+#
+iac_test <- iac(ecoPD_cdm)
+pae_test
+aed_test
+ed_test
+aed_test
+ls()
+iac_test
+haed_test
+this script is to be used for calculating all metrics of interest for our simulation study#
+##because ecoPD turns out to be uninstallable from CRAN repositories, it's probably a wise choice#
+##to install all functions manually, rather than have to figure out how to get it installed#
+##an additional benefit of this is that we can easily rename a function they called pd, but#
+##that would conflict with picante, especially if we called that package first#
+#
+##first load the packages ecoPD depends on#
+#
+library(phylobase)#
+library(grid)#
+library(Rcpp)#
+#
+##also define picante, since we removed the conflict with pd#
+#
+library(picante)#
+#
+##define the function called utilities.R#
+#
+# internal function to compute distances from one node to all others#
+# NOTE: assumes node IDs are always 1:n (currently true of phylo4 objs)#
+dijkstra <- function(phy, node) {#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- rep(Inf, length=n)#
+  names(d) <- nodes#
+  d[node] <- 0#
+  while (length(nodes)>0) {#
+    u <- nodes[which.min(d[nodes])[[1]]]#
+    if (is.infinite(d[u])) break#
+    nodes <- nodes[-match(u, nodes)]#
+    anc <- edge[edge[,2]==u,1]#
+    for (parent in anc[anc %in% nodes]) {#
+      alt <- d[u] + elen[paste(parent, u, sep="-")]#
+      if (alt < d[parent]) {#
+        d[parent] <- alt#
+      }#
+    }#
+    des <- edge[edge[,1]==u,2]#
+    for (child in des[des %in% nodes]) {#
+      alt <- d[u] + elen[paste(u, child, sep="-")]#
+      if (alt < d[child]) {#
+        d[child] <- alt#
+      }#
+    }#
+  }#
+  d#
+}#
+#
+# tip length extractor#
+tipLength <- function(phy, from=c("parent", "root")) {#
+  from <- match.arg(from)#
+  tips <- nodeId(phy, type="tip")#
+  if (from=="parent") {#
+    len <- edgeLength(phy, tips)#
+  } else if (from=="root") {#
+    len <- dijkstra(phy, rootNode(phy))#
+    len <- len[match(tips, names(len))]#
+  }#
+  names(len) <- tipLabels(phy)#
+  return(len)#
+}#
+#
+# abundance extractor#
+abundance <- function(phy, comm, tip, na.zero=FALSE) {#
+    communities <- names(phy@metadata$comms)#
+    if (missing(comm)) {#
+        comm <- communities#
+    }#
+    doNotExist <- !comm %in% communities#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in phy: ",#
+            paste(comm[doNotExist], collapse=", "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- getNode(phy, tip, type="tip", missing="warn")#
+        tip <- names(tip)[!is.na(tip)]#
+    }#
+    N <- tipData(phy)[tip, comm, drop=FALSE]#
+    if (na.zero) N[is.na(N)] <- 0#
+    return(N)#
+}#
+#
+# abundance assignment function#
+`abundance<-` <- function(phy, comm, tip, value) {#
+    if (!is.atomic(comm) || length(comm)!=1) {#
+        stop("when replacing, comm must be a vector of length 1")#
+    } else if (!comm %in% names(phy@metadata$comms)) {#
+        stop(paste("community", comm, "not found in phy", sep=" "))#
+    }#
+    if (missing(tip)) {#
+        tip <- tipLabels(phy)#
+    } else {#
+        tip <- names(getNode(phy, tip, type="tip", missing="fail"))#
+    }#
+    tipData(phy)[tip, comm] <- value#
+    return(phy)#
+}#
+#
+presence <- function(phy, comm, tip, na.zero=FALSE) {#
+    N <- abundance(phy, comm, tip, na.zero=na.zero)#
+    N[N > 0] <- 1#
+    N[N <= 0] <- 0#
+    N#
+}#
+#
+richness <- function(phy, comm, na.zero=FALSE) {#
+    P <- presence(phy, comm, na.zero=na.zero)#
+    colSums(P)#
+}#
+#
+# minTL extractor#
+minTL <- function(phy) {#
+  minTL <- tipData(phy)$minTL#
+  if (!is.null(minTL)) {#
+    names(minTL) <- row.names(tipData(phy))#
+  }#
+  return(minTL)#
+}#
+#
+# Note: function assumes values are in nodeId(phy, "tip") order#
+# minTL assignment function#
+`minTL<-` <- function(phy, value) {#
+  if (!is.numeric(value)) {#
+    stop("minTL values must be a numeric vector")#
+  } else if (length(value)!=nTips(phy)) {#
+    stop("number of minTL values must equal number of species")#
+  }#
+  tipData(phy)[["minTL"]] <- value#
+  return(phy)#
+}#
+#
+# community labels extractor#
+communities <- function(x) {#
+  names(x@metadata$comms)#
+}#
+#
+## this works as implementation of dist.nodes for phylo4 objects, albeit#
+## about 1.5x slower than dist.nodes#
+pairdist <- function(phy, type=c("all", "tip"), use.labels=FALSE) {#
+#
+  if (hasPoly(phy) || hasRetic(phy)) {#
+    stop("pairdist can't currently handle polytomies or reticulation")#
+  }#
+#
+  type <- match.arg(type)#
+  edge <- edges(phy, drop.root=TRUE)#
+  elen <- edgeLength(phy)#
+  elen <- elen[!names(elen) %in% edgeId(phy, "root")]#
+  nodes <- nodeId(phy, "all")#
+  n <- length(nodes)#
+  d <- matrix(NA_real_, nrow=n, ncol=n)#
+  diag(d) <- 0#
+  d[edge] <- d[edge[,2:1]] <- elen#
+  ntips <- nTips(phy)#
+  tips <- nodeId(phy, "tip")#
+  tip.parents <- sapply(tips, function(n) edge[edge[,2]==n, 1])#
+  nodes.todo <- tip.parents[duplicated(tip.parents)]#
+  done <- tips#
+  root <- if (isRooted(phy)) rootNode(phy) else ntips+1#
+  descendants <- matrix(edge[order(edge[,1]),2], nrow=2)#
+  ancestors <- edge[match(nodes, edge[,2]), 1]#
+#
+  while(length(nodes.todo)>0) {#
+    nod <- nodes.todo[1]#
+    if (nod==root && length(nodes.todo)>1) {#
+      nod <- nodes.todo[2]#
+    }#
+    des1 <- descendants[1, nod-ntips]#
+    des2 <- descendants[2, nod-ntips]#
+    if (des1>ntips) des1 <- which(!is.na(d[des1, ]))#
+    if (des2>ntips) des2 <- which(!is.na(d[des2, ]))#
+    for (y in des1) {#
+      d[y, des2] <- d[des2, y] <- d[nod, y] + d[nod, des2]#
+    }#
+    if (nod!=root) {#
+      anc <- ancestors[nod]#
+      l <- elen[paste(anc, nod, sep="-")]#
+      d[des2, anc] <- d[anc, des2] <- d[nod, des2] + l#
+      d[des1, anc] <- d[anc, des1] <- d[nod, des1] + l#
+      done <- c(done, nod)#
+      if (all(descendants[, anc-ntips] %in% done)) {#
+        nodes.todo <- c(nodes.todo, anc)#
+      }#
+    }#
+    nodes.todo <- nodes.todo[nod!=nodes.todo]#
+  }#
+#
+  if (type=="tip") {#
+    d <- d[1:ntips, 1:ntips]#
+  }#
+#
+  if (use.labels) {#
+    rownames(d) <- colnames(d) <- unname(labels(phy, type=type))#
+  } else {#
+    rownames(d) <- colnames(d) <- nodeId(phy, type=type)#
+  }#
+#
+  return(d)#
+}#
+#
+##define a function called coerce.R#
+#
+setMethod("phylo4d", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4d"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+#
+    ## get the tree#
+    tree <- phylo4(x, community)#
+#
+    ## get abundance values, and drop species with zero abundance#
+    N <- abundance(x, community)#
+    N <- N[N[[community]]!=0, , drop=FALSE]#
+#
+    ## combine and return phylo4d object#
+    phylo4d(tree, tip.data=N)#
+})#
+#
+setMethod("phylo4", c("phylo4com"),#
+  function(x, community) {#
+    if (missing(community)) {#
+        return(as(x, "phylo4"))#
+    }#
+    if (length(community)!=1) {#
+        stop("a single community label must be provided")#
+    }#
+    getSubtrees(x, community)[[1]]#
+})#
+#
+## internal helper function for extracting a list of the subtrees#
+## associated with each communities#
+getSubtrees <- function(x, community) {#
+    communities <- x@metadata$comms#
+    if (missing(community)) {#
+        community <- names(communities)#
+    }#
+    doNotExist <- !community %in% names(communities)#
+    if (any(doNotExist)) {#
+        stop("one or more communities not found in x: ",#
+            paste(community[doNotExist], collapse=", "))#
+    }#
+    res <- x@subtrees[communities[names(communities) %in% community]]#
+    names(res) <- community#
+    return(res)#
+}#
+##define phylo4com.R#
+#
+setClass("phylo4com",#
+    representation(subtrees="list"),#
+    prototype = list(subtrees = list()),#
+    validity = checkPhylo4,#
+    contains="phylo4d")#
+#
+## create single tree with all data in it, plus a list of subtrees (sans#
+## data) for each unique species composition#
+setGeneric("phylo4com", function(x, n, ...) {#
+    standardGeneric("phylo4com")#
+})#
+#
+setMethod("phylo4com", c("phylo", "ANY"),#
+  function(x, n, ..., check.node.labels="keep") {#
+    x <- phylo4(x, check.node.labels)#
+    phylo4com(x, n, ...)#
+})#
+#
+setMethod("phylo4com", c("phylo4", "numeric"),#
+  function(x, n, communityID, species,#
+    missing=c("warn", "OK", "fail")) {#
+#
+    ## create site-by-species abundance matrix#
+    comm <- factor(communityID, levels=unique(communityID))#
+    taxa <- factor(species)#
+    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+        dimnames=list(levels(taxa), unique(comm)))#
+    dat[cbind(taxa, comm)] <- n#
+#
+    ## hand off to the phylo4com matrix method#
+    phylo4com(x, dat, missing)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "matrix"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+#
+    taxa <- rownames(n)#
+    if (any(duplicated(taxa))) {#
+        stop("duplicated taxa are not permitted")#
+    }#
+    comm <- colnames(n)#
+    if (any(duplicated(comm))) {#
+        stop("duplicated community IDs are not permitted")#
+    }#
+#
+    phy <- subset(x, tips.include=taxa)#
+    phyd <- addData(phy, tip.data=n, extra.data="OK")#
+    phylo4com(phyd, cols=comm)#
+#
+})#
+#
+setMethod("phylo4com", c("phylo4", "data.frame"),#
+  function(x, n, missing=c("warn", "OK", "fail")) {#
+    n <- as.matrix(n)#
+    phylo4com(x, n, missing)#
+})#
+#
+setMethod("phylo4com", c("phylo4d", "missing"),#
+  function(x, n, cols) {#
+#
+    if (missing(cols)) {#
+        cols <- names(tipData(x))#
+    }#
+    if (is.null(cols)) {#
+        res <- as(x, "phylo4com")#
+        res@metadata$comms <- NULL#
+        return(res)#
+    }#
+    x@metadata$comms <- setNames(rep(NA, length(cols)),#
+        make.names(cols))#
+#
+    # create trees for each unique community wrt composition only#
+    P <- presence(x)#
+    phy <- extractTree(x)#
+    ids <- as.character(as.numeric(factor(sapply(P, paste,#
+        collapse=""))))#
+    subtrees <- lapply(P[!duplicated(ids)],#
+        function(n) subset(phy, rownames(P)[n %in% 1]))#
+    names(subtrees) <- ids[!duplicated(ids)]#
+#
+    res <- as(x, "phylo4com")#
+    res@subtrees <- subtrees#
+    res@metadata$comms[] <- ids#
+    return(res)#
+})#
+## older approach: create a single phylo4d object with all data in it#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    comm <- factor(communityID, levels=unique(communityID))#
+#    taxa <- factor(species)#
+#    dat <- matrix(0, nrow=nlevels(taxa), ncol=nlevels(comm),#
+#      dimnames=list(levels(taxa), unique(comm)))#
+#    dat[cbind(taxa, comm)] <- abundance#
+##
+#    subtree <- subset(tree, tips.include=levels(taxa))#
+##
+#    res <- addData(subtree, tip.data=dat, extra.data="OK")#
+#    res@metadata$comms <- make.names(unique(comm))#
+#    return(res)#
+##
+#}#
+#
+## similar to above, but cast function from reshape package#
+#phylo4com <- function(communityID, species, abundance, tree,#
+#    missing=c("warn", "OK", "fail")) {#
+##
+#    raw <- data.frame(.taxa=factor(species), .comm=factor(communityID),#
+#      value=abundance, stringsAsFactors=FALSE)#
+#    dat <- cast(.taxa ~ .comm, data=raw)#
+#    row.names(dat) <- dat[[1]]#
+#    dat <- dat[-1]#
+##
+#    subtree <- subset(tree, tips.include=row.names(dat))#
+##
+#    addData(subtree, tip.data=dat,#
+#      metadata=list(comms=make.names(colnames(dat))), extra.data="OK")#
+##
+#}#
+#
+##define a function called community.R#
+#
+# Generate site-by-species matrix#
+siteBySpecies <- function(phy, presence.only=FALSE,#
+    na.zero=FALSE, transpose=FALSE) {#
+#
+    if (presence.only) {#
+        dat <- presence(phy, na.zero=na.zero)#
+    } else {#
+        dat <- abundance(phy, na.zero=na.zero)#
+    }#
+    mat <- as.matrix(dat)#
+    if (!transpose) mat <- t(mat)#
+    return(mat)#
+#
+}#
+#
+##define simpson.R#
+#
+###
+## Simpson's index with and without phylogenetic distances#
+###
+#
+setGeneric("simpson",#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    standardGeneric("simpson")#
+})#
+#
+setMethod("simpson", signature(x="phylo4d"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    phyc <- phylo4com(x)#
+    simpson(phyc, method=method)#
+})#
+#
+setMethod("simpson", signature(x="phylo4com"),#
+  function(x, method=c("phylogenetic", "traditional")) {#
+    method <- match.arg(method)#
+    N.relative <- prop.table(t(abundance(x)), 1)#
+    if (method=="phylogenetic") {#
+        dmat <- pairdist(x, type="tip")#
+    } else {#
+        dmat <- matrix(1, nTips(x), nTips(x))#
+        diag(dmat) <- 0#
+    }   #
+    out <- apply(N.relative, 1, function(n) sum((n %o% n)*dmat))#
+    return(out) #
+})#
+#
+## earlier version: works on a single phylo4d tree with abundance data#
+#simpson <- function(phy, method=c("traditional", "phylogenetic")) {#
+#  method <- match.arg(method)#
+#  x <- prop.table(abundance(phy))#
+#  if (method=="phylogenetic") {#
+#    dmat <- pairdist(phy, type="tip")#
+#  } else {#
+#    dmat <- matrix(1, nTips(phy), nTips(phy))#
+#    diag(dmat) <- 0#
+#  }   #
+#  sum((x %o% x) * dmat)#
+#}#
+#
+##define function they called pd.R, but call it pd_from_Cadotte.R. #
+##i carefully replaced all instances of the use of function pd() with this.#
+##hopefully it works, since pd is in picante#
+#
+###
+## PD methods#
+###
+#
+setGeneric("pd_from_Cadotte", function(x, ...) {#
+    standardGeneric("pd_from_Cadotte")#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4"),#
+  function(x, method=c("traditional")) {#
+    method <- match.arg(method)#
+    if (isRooted(x)) {#
+        nonroot.nodes <- setdiff(nodeId(x), rootNode(x))#
+        tot.length <- sum(edgeLength(x, nonroot.nodes))#
+    } else {#
+        tot.length <- sum(edgeLength(x))#
+    }#
+    return(tot.length)#
+  }#
+)#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4d"), function(x,#
+  method=c("traditional", "polytomy", "yule"), ...) {#
+    phyc <- phylo4com(x, ...)#
+    pd_from_Cadotte(phyc, method=method)#
+})#
+#
+setMethod("pd_from_Cadotte", signature(x="phylo4com"), function(x,#
+  method=c("traditional", "polytomy", "yule")) {#
+#
+    method <- match.arg(method)#
+#
+    if (method %in% c("polytomy", "yule")) {#
+        message("estimating minTL values from Supertree")#
+        res <- sapply(communities(x), function(community) {#
+            phyd <- phylo4d(x, community)#
+            n <- tipData(phyd)[[community]]#
+            pd_from_Cadotte(extractTree(weightByAbund(phyd, n, method)))#
+        })#
+    } else if (method == "traditional") {#
+        comms <- x@metadata$comms#
+        if (is.null(comms)) {#
+            return(.pd_from_Cadotte(extractTree(x), method))#
+        }#
+        subtrees <- x@subtrees[as.character(comms)]#
+        res <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+        names(res) <- names(comms)#
+    }#
+    return(res)#
+#
+})#
+#
+# lookup function for minimum tip length#
+getMinTL <- function(tree, genera) {#
+#
+  Supertree <- phylo4(Supertree)#
+#
+  if (missing(genera)) stop("must supply vector of genera")#
+#
+  # Families, Supertree, and LookupTL are all system data built into#
+  # the package#
+#
+  # Supplied tree must be ultrametric#
+# Not sure this is necessary?? Removing for now...#
+#  tree.phy <- suppressWarnings(as(foo, "phylo"))#
+#  if (!is.ultrametric(tree.phy)) {#
+#    stop(deparse(substitute(tree)), " is not ultrametric")#
+#  }#
+#
+  # TODO: if genus not in Families vector, need to give warning.#
+  families <- Families[genera]#
+#
+  # if Family is not in LookupTL give a warning, and later#
+  # use minTL based on average across all families in the lookup table#
+  if (!all(families %in% row.names(LookupTL))) {#
+    warning("one or more taxa missing from lookup table; using mean minTL")#
+  }#
+#
+  familiesInSupertree <- LookupTL[families, "supertree"]#
+  familiesInSupertree <- as.character(familiesInSupertree)#
+#
+  # Subset the supertree using families from the user-supplied tree. If#
+  # any user-supplied taxa cannot be matched to families in the#
+  # supertree, they are simply ignored#
+  subsupertree <- subset(Supertree, na.omit(familiesInSupertree))#
+  subsupertree.maxLength <- max(pairdist(subsupertree, type="tip"))/2#
+  tree.maxLength <- max(tipLength(tree, from="root"))#
+#
+  tableTL <- LookupTL[familiesInSupertree, "minTL"]#
+#
+  # if any TLs are 0 or NA, give warning and use average minTL across#
+  # all families in the LookupTL table#
+  if(any(tableTL==0 | is.na(tableTL))) {#
+    numNA <- sum(tableTL==0 | is.na(tableTL))#
+    warning("Using meanTL for ", numNA, " tip", if(numNA>1) "s") #
+    # calculate average minTL across the entire LookupTL table,#
+    # excluding any non-positive or NA values#
+    meanMinTL <- mean(LookupTL$minTL[LookupTL$minBL > 0], na.rm=TRUE)#
+    tableTL[is.na(tableTL)] <- meanMinTL  #
+    tableTL[tableTL<=0] <- meanMinTL  #
+  }#
+#
+  lookupTL <- tableTL * (tree.maxLength / subsupertree.maxLength)#
+  actualTL <- tipLength(tree, from="parent")#
+  minTL <- ifelse(lookupTL < actualTL, lookupTL, actualTL)#
+#
+  return(minTL)#
+}#
+#
+# function to weight tip length based on abundance#
+weightByAbund <- function(tree, n, method=c("polytomy", "yule")) {#
+#
+  method <- match.arg(method)#
+#
+  if (is.null(minTL(tree))) {#
+    minLength <- getMinTL(tree, genera(tree))#
+  } else {#
+    minLength <- minTL(tree)#
+  }#
+#
+  tipLen <- tipLength(tree)#
+#
+  if (method=="polytomy") {#
+    newLength <- tipLen + (n-1) * minLength#
+  } else if (method=="yule") {#
+    C <- 0.57722#
+    newLength <- tipLen - minLength +#
+      (minLength * (n-1) / (log(n) + C-1))#
+  }#
+#
+  # Note that this is (unfortunately) tightly coupled to the#
+  # implementation of phylo4 objects -- an assignment method would be#
+  # better#
+  tree@edge.length[getEdge(tree, nodeId(tree, "tip"))] <- newLength#
+#
+  return(tree)#
+#
+}#
+#
+##define a function called pae.R#
+#
+###
+## PAE methods#
+###
+#
+setGeneric("pae", function(x, na.rm=TRUE) {#
+    standardGeneric("pae")#
+})#
+#
+setMethod("pae", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    pae(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("pae", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    N <- abundance(x)#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+#
+    # now for each subtree...#
+    #PD <- sapply(subtrees, pd_from_Cadotte)[as.character(comms)]#
+    PD <- pd_from_Cadotte(x)#
+    tmp <- setNames(rep(0, nTips(x)), tipLabels(x))#
+    TL <- lapply(subtrees, function(tree) {#
+        res <- tipLength(tree)#
+        tmp[match(names(res), names(tmp))] <- res#
+        tmp#
+    })#
+    TL <- do.call("cbind", TL[as.character(comms)])#
+#
+    numer <- PD + colSums(TL * (N - 1))#
+    denom <- PD + (colSums(N, na.rm = na.rm) / colSums(presence(x),#
+        na.rm=na.rm) - 1) * colSums(TL)#
+    res <- numer/denom#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+##define a function called iac.R#
+#
+###
+## IAC methods#
+###
+#
+setGeneric("iac", function(x, na.rm=TRUE) {#
+    standardGeneric("iac")#
+})#
+#
+setMethod("iac", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    iac(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("iac", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .denom <-  function(tree, template) {#
+        # Count number of lineages originating at each internal node#
+        # (i.e. number of splits)#
+        int.nodes <- nodeId(tree, "internal")#
+        nSplits <- sapply(int.nodes, function(x) length(children(tree,#
+            x)))#
+        names(nSplits) <- int.nodes#
+        # For each tip, take the product of the number of splits across#
+        # all of its ancestral nodes#
+        res <- sapply(ancestors(tree, tipLabels(tree)), function(x)#
+            prod(nSplits[as.character(x)]))#
+        template[match(names(res), names(template))] <- res#
+        template#
+    }#
+#
+    # now for each subtree...#
+    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+    denom <- lapply(subtrees, .denom, tmp)#
+    denom <- do.call("cbind", denom[as.character(comms)])#
+    nnodes <- sapply(x@subtrees, nNodes)[as.character(comms)]#
+#
+    # Calculate expected number of individuals under null hypothesis#
+    # of equal allocation to each lineage at each (node) split #
+    N <- abundance(x)#
+    expected <- t(colSums(N, na.rm=na.rm) / t(denom))#
+#
+    # IAC: summed absolute difference between expected and observed#
+    # abundances, divided by number of nodes#
+    colSums(abs(expected - N), na.rm=na.rm) / nnodes#
+#
+})#
+#
+##define a function called aed.R#
+#
+###
+## ED and related methods#
+###
+#
+setGeneric("ed", function(x, na.rm=TRUE) {#
+    standardGeneric("ed")#
+})#
+#
+setMethod("ed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    ed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("ed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .edi <- function(tree) {#
+        # set length of root edge to zero#
+        edgeLength(tree)[edgeId(tree, "root")] <- 0#
+#
+        all.nodes <- nodeId(tree, type = "all")#
+        des <- descendants(tree, all.nodes, type="tips")#
+        nv <- edgeLength(tree, all.nodes) / sapply(des, length)#
+        names(nv) <- all.nodes#
+#
+        tip.nodes <- nodeId(tree, "tip")#
+        anc <- ancestors(tree, tip.nodes, "ALL")#
+#
+        res <- sapply(anc, function(n) sum(nv[as.character(n)], na.rm=TRUE))#
+        names(res) <- tipLabels(tree)#
+        res#
+    }#
+    res <- lapply(subtrees, .edi)[as.character(comms)]#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+setGeneric("hed", function(x, na.rm=TRUE) {#
+    standardGeneric("hed")#
+})#
+#
+setMethod("hed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    hed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("hed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    ED <- ed(x)#
+    PD <- pd_from_Cadotte(x)#
+    res <- sapply(seq_len(length(PD)), function(i) {#
+        scaledED <- ED[[i]] / PD[[i]]#
+        -sum(scaledED * log(scaledED))#
+    })#
+    names(res) <- names(PD)#
+    return(res)#
+})#
+#
+setGeneric("eed", function(x, na.rm=TRUE) {#
+    standardGeneric("eed")#
+})#
+#
+setMethod("eed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    hed(x) / log(sapply(subtrees, nTips)[as.character(comms)])#
+})#
+#
+setGeneric("aed", function(x, na.rm=TRUE) {#
+    standardGeneric("aed")#
+})#
+#
+setMethod("aed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    aed(phyc, na.rm=na.rm)#
+})#
+#
+# TODO: This function includes its own code for not counting root edge#
+# length. Maybe this should maybe be done at a higher level?#
+setMethod("aed", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+#
+    comms <- x@metadata$comms#
+    if (is.null(comms)) {#
+        stop("no community data specified in phylo4com object")#
+    }#
+    subtrees <- x@subtrees[unique(as.character(comms))]#
+    .isD <- function(tree) {#
+        # get all node IDs, but excluding root node#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        # Create logical matrix indicating which tips (in columns) are#
+        # descendants of each node (in rows), self-inclusive#
+        t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+            function(n) nonroot.nodes %in% n))#
+    }#
+#
+    .elen <- function(tree) {#
+        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+        edgeLength(tree, nonroot.nodes)#
+    }#
+    isDescendant <- lapply(subtrees, .isD)[as.character(comms)]#
+    edge.length <- lapply(subtrees, .elen)[as.character(comms)]#
+    N <- abundance(x)#
+#
+    res <- lapply(seq_along(N), function(i) {#
+        spp <- row.names(isDescendant[[i]])        #
+        dAbund <- N[spp, i] * isDescendant[[i]]#
+#
+        # Calculate individual-based AED of each species#
+        AED <- colSums(edge.length[[i]] * t(prop.table(dAbund, margin=2)))#
+        AED/N[spp, i]#
+    })#
+    names(res) <- names(comms)#
+    return(res)#
+#
+})#
+#
+#    .isD <- function(tree, template) {#
+#        # get all node IDs, but excluding root node#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        # Create logical matrix indicating which tips (in columns) are#
+#        # descendants of each node (in rows), self-inclusive#
+#        res <- t(sapply(ancestors(tree, tipLabels(tree), "ALL"),#
+#          function(n) nonroot.nodes %in% n))#
+#        template[match(rownames(res), rownames(template)), ] <- res#
+#        template#
+#    }#
+##
+#    .el <- function(tree) {#
+#        nonroot.nodes <- setdiff(nodeId(tree), rootNode(tree))#
+#        edgeLength(tree, nonroot.nodes)#
+#    }#
+#    tmp <- setNames(rep(NA, nTips(x)), tipLabels(x))#
+#    tmp <- matrix(NA, nrow=nTips(x), ncol=nNodes(x)+nTips(x)-1)#
+#    rownames(tmp) <- tipLabels(x)#
+#    isDescendant <- lapply(subtrees, .isD, tmp)#
+#    isDescendant <- array(unlist(isDescendant), dim=c(nTips(x),#
+#        nTips(x)+nNodes(x)-1, length(subtrees)))#
+##
+#    # Create vector of ancestral edge lengths#
+#    edge.length <- sapply(subtrees, .elen)#
+##
+#    # Create matrix containing number of individuals of each species#
+#    # descending from each interior node#
+#    N <- as.matrix(abundance(x))#
+#    dAbund <- sweep(isDescendant, c(1,3), N, "*")#
+##
+#    # Calculate individual-based AED of each species#
+#    pt <- prop.table(dAbund, margin=c(2,3))#
+#    AED <- sweep(pt, c(2,3), edge.length, "*")#
+#    AED <- apply(AED, 3, rowSums) / N#
+##
+#    return(AED)#
+#
+setGeneric("haed", function(x, na.rm=TRUE) {#
+    standardGeneric("haed")#
+})#
+#
+setMethod("haed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    haed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("haed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+    # Recast AED in terms of individuals#
+    AED <- aed(x)#
+    PD <- pd_from_Cadotte(x)#
+    N <- abundance(x)#
+    scaled.AED <- lapply(seq_along(N), function(i) {#
+        spp <- names(AED[[i]])        #
+        rep(unname(AED[[i]]), N[spp, i]) / PD[[i]]#
+    })#
+    res <- sapply(scaled.AED, function(x) -sum(x * log(x)))#
+    names(res) <- names(AED)#
+    return(res)#
+})#
+#
+setGeneric("eaed", function(x, na.rm=TRUE) {#
+    standardGeneric("eaed")#
+})#
+#
+setMethod("eaed", signature(x="phylo4d"), function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    eaed(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("eaed", signature(x="phylo4com"), function(x, na.rm=TRUE) {#
+  haed(x) / log(colSums(abundance(x)))#
+})#
+#
+setGeneric("value",#
+  function(x, na.rm=TRUE) {#
+    standardGeneric("value")#
+})#
+#
+setMethod("value", signature(x="phylo4d"),#
+  function(x, na.rm=TRUE) {#
+    phyc <- phylo4com(x)#
+    value(phyc, na.rm=na.rm)#
+})#
+#
+setMethod("value", signature(x="phylo4com"),#
+  function(x, na.rm=TRUE) {#
+    AED <- aed(x)#
+    lapply(AED, function(x) x/sum(x))#
+})#
+#
+##define a function you wrote that will get the richness of each community#
+#
+lengthNonZeros <- function(input.vector)#
+{#
+	nonZeros <- input.vector[input.vector != 0]#
+	return(length(nonZeros))#
+}#
+#
+##define your modified mpd function#
+#
+modified.mpd <- function (samp, dis, abundance.weighted = FALSE) #
+{#
+    N <- dim(samp)[1]#
+    mpd <- numeric(N)#
+    for (i in 1:N) {#
+        sppInSample <- names(samp[i, samp[i, ] > 0])#
+        if (length(sppInSample) > 1) {#
+            sample.dis <- dis[sppInSample, sppInSample]#
+            if (abundance.weighted == "interspecific") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+	            diag(sample.weights) <- 0#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else if (abundance.weighted == "intraspecific") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+	            diag(sample.weights) <- diag(sample.weights) - sqrt(diag(sample.weights))#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else if (abundance.weighted == "complete") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else {#
+                mpd[i] <- mean(sample.dis[lower.tri(sample.dis)])#
+            }#
+        }#
+        else {#
+            mpd[i] <- NA#
+        }#
+    }#
+    mpd#
+}#
+#
+##define Helmus' modified PSC function#
+#
+##this is Helmus' corrected PSC script#
+#
+psc.corr<-function(samp,tree){#
+  # Make samp matrix a pa matrix#
+  samp[samp>0]<-1#
+  flag=0#
+  if (is.null(dim(samp))) #if the samp matrix only has one site#
+  {#
+    samp<-rbind(samp,samp)#
+    flag=2#
+  }#
+#
+  if(is(tree)[1]=="phylo")#
+  {#
+    if(is.null(tree$edge.length)){tree<-compute.brlen(tree, 1)}  #If phylo has no given branch lengths#
+    tree<-prune.sample(samp,tree)#
+    # Make sure that the species line up#
+    samp<-samp[,tree$tip.label]#
+    # Make a correlation matrix of the species pool phylogeny#
+    Cmatrix<-vcv.phylo(tree,cor=TRUE)#
+  } else {#
+    Cmatrix<-tree#
+    species<-colnames(samp)#
+    preval<-colSums(samp)/sum(samp)#
+    species<-species[preval>0]#
+    Cmatrix<-Cmatrix[species,species]#
+    samp<-samp[,colnames(Cmatrix)]#
+  }#
+#
+  # numbers of locations and species#
+  SR<-rowSums(samp)#
+  nlocations<-dim(samp)[1]#
+  nspecies<-dim(samp)[2]#
+#
+  ###################################
+  # calculate observed PSCs#
+  ##
+  PSCs<-NULL#
+#
+  for(i in 1:nlocations)#
+  {#
+    index<-seq(1:nrow(Cmatrix))[samp[i,]==1]	#species present#
+    n<-length(index)			#number of species present#
+    if(n>1)#
+    {    #
+      C<-Cmatrix[index,index]	#C for individual locations#
+      diag(C)<--1#
+      PSC<-1-(sum(apply(C,1,max))/n)   #THIS LINE IS WRONG IN THE PICANTE VERSION#
+    } else {PSC<-NA}#
+      PSCs<-c(PSCs,PSC)#
+  }#
+    PSCout<-cbind(PSCs,SR)#
+ if (flag==2)#
+  {#
+    PSCout<-PSCout[-2,]#
+    return(PSCout)  #
+  } else {#
+    return(data.frame(PSCout))#
+  }#
+}#
+#
+##now write functions to get the various data sets and formats into order#
+##phylo4com takes an x = phylo, n = abundance matrix with species as rows and sites as columns#
+##take the following lines of code out after you have a real community data matrix (cdm)#
+##and phylogeny going into it. these are just for practice#
+#
+data(phylocom)#
+#
+phylo <- phylocom$phylo#
+#
+cdm <- phylocom$sample ##sites are rows, species are columns#
+#
+##in a picante cdm, sites are rows, species are columns#
+#
+allMetrics <- function(tree, picante_cdm)#
+{#
+	spacodiR_cdm <- t(picante_cdm) ##species are rows, sites are columns#
+	ecoPD_cdm <- phylo4com(tree, spacodiR_cdm) ##this is by far the slowest thing happening in this function so far! who knows why?! we need to fix that probably#
+#
+	dists <- cophenetic(tree)#
+#
+	richness <- apply(picante_cdm, 1, lengthNonZeros)#
+#
+	NAW_MPD <- modified.mpd(picante_cdm, dists, abundance.weighted=FALSE)#
+	inter_MPD <- modified.mpd(picante_cdm, dists, abundance.weighted="interspecific")#
+#
+	intra_MPD <- modified.mpd(picante_cdm, dists, abundance.weighted="intraspecific")#
+	complete_MPD <- modified.mpd(picante_cdm, dists, abundance.weighted="complete")#
+#
+	NAW_MNTD <- mntd(picante_cdm, dists, abundance.weighted=FALSE)#
+#
+	AW_MNTD <- mntd(picante_cdm, dists, abundance.weighted=TRUE)#
+#
+	PSV <- psv(picante_cdm, tree)#
+	PSV <- PSV$PSVs#
+	PSC <- psc.corr(picante_cdm, tree) #
+	PSC <- PSC$PSCs#
+	PSE <- pse(picante_cdm, tree)#
+	PSE <- PSE$PSEs#
+	##all of Cadotte's metrics run horribly slow#
+	PAE <- pae(ecoPD_cdm)#
+	IAC <- iac(ecoPD_cdm) ##this runs very slow!#
+#
+	Haed <- haed(ecoPD_cdm)#
+#
+	Eaed <- eaed(ecoPD_cdm)#
+#
+	Eed <- eed(ecoPD_cdm)#
+#
+	Hed <- hed(ecoPD_cdm)#
+	SimpsonsPhy <- simpson(ecoPD_cdm, method="phylogenetic")#
+	PD <- pd(picante_cdm, tree, include.root=TRUE)#
+	PD <- PD$PD#
+	PD_Cadotte <- pd(picante_cdm, tree, include.root=FALSE)#
+	PD_Cadotte <- PD_Cadotte$PD#
+	results <- data.frame(richness, NAW_MPD, inter_MPD, intra_MPD, complete_MPD, NAW_MNTD, AW_MNTD, PSV, PSC, PSE, PAE, IAC, Haed, Eaed, Eed, Hed, SimpsonsPhy, PD, PD_Cadotte)#
+	row.names(results) <- row.names(picante_cdm) ##there is a very important caveat here in that you have to make sure EVERY AND ALL function returns the communities in the order they were input in#
+	return(results)#
+}
+ls()
+head(cdm)
+allMetrics(phylo,t(cdm))
+allMetrics(phylo,cdm)
+allMetrics(phylo,cdm)->results
+plot(results)
+repulsing <- FALSE#
+#
+if (repulsing) {#
+	max_dist <- 30 # maximum distance at which an individual is affected by neighbouring individuals.#
+	nl <- 1 #non-linearity#
+	max_travel <- 5 # maximum distance an individual will move in a single iteration of the model. This is what is called repulsion and reported for the y-axis of the plot. Change this to a smaller value if I want the individuals to make smaller distance moves in each run, and so be more influenced by the composition of their neighbourhodd through time. With a high number an individual can make a large distance move, and when doing this it does not take into consideration the neighbourhood where it will end up. The only decision in this model is how far and in what direction to move away from the individual's current neighbourhood, i.e. only consider current and not potential neighbours.#
+	steepness <- 1#
+	proportion_replaced <- 0#
+	offset <- 0  ## moves left or right in reverse direction#
+#
+	x <- seq(0,max_dist,0.2)#
+	plot(NULL,ylim=c(0,max_travel),xlim=c(0,max_dist),xlab="Distance",ylab="Repulsion",xaxs="i",yaxs="i")#
+	for (gd in seq(0,1,0.1)) {#
+		y <- max_travel*(1-(steepness/(steepness+exp(-x-offset+((1-gd)^nl*max_dist)+1))))#
+		lines(x,y)#
+		text(1.2+((1-gd)^nl*max_dist)-offset,0.5*max_travel,gd,srt=-74)#
+	}
+}
+DEFINE A FUNCTION OF ATTRACTION REPULSION ACCORDING TO GD AND SPATIAL DISTANCE (1-ATTRACTION)#
+#
+repulsing <- FALSE#
+#
+if (repulsing) {#
+	max_dist <- 30 # maximum distance at which an individual is affected by neighbouring individuals.#
+	nl <- 1 #non-linearity#
+	max_travel <- 5 # maximum distance an individual will move in a single iteration of the model. This is what is called repulsion and reported for the y-axis of the plot. Change this to a smaller value if I want the individuals to make smaller distance moves in each run, and so be more influenced by the composition of their neighbourhodd through time. With a high number an individual can make a large distance move, and when doing this it does not take into consideration the neighbourhood where it will end up. The only decision in this model is how far and in what direction to move away from the individual's current neighbourhood, i.e. only consider current and not potential neighbours.#
+	steepness <- 1#
+	proportion_replaced <- 0#
+	offset <- 0  ## moves left or right in reverse direction#
+#
+	x <- seq(0,max_dist,0.2)#
+	plot(NULL,ylim=c(0,max_travel),xlim=c(0,max_dist),xlab="Distance",ylab="Repulsion",xaxs="i",yaxs="i")#
+	for (gd in seq(0,1,0.1)) {#
+		y <- max_travel*(1-(steepness/(steepness+exp(-x-offset+((1-gd)^nl*max_dist)+1))))#
+		lines(x,y)#
+		text(1.2+((1-gd)^nl*max_dist)-offset,0.5*max_travel,gd,srt=-74)#
+	}#
+} else {#
+	min_dist <- 100#
+	max_dist <- 150#
+	nl <- 0.01 #non-linearity#
+	max_travel <- 5#
+	steepness <- 1#
+	proportion_replaced <- 0#
+	offset <- 0  ## moves left or right in reverse direction#
+#
+	x <- seq(0,max_dist,0.2)#
+	plot(NULL,ylim=c(0,max_travel),xlim=c(0,max_dist),xlab="Distance",ylab="Attraction",xaxs="i",yaxs="i")#
+	for (gd in seq(0,1,0.1)) {#
+		y <- max_travel*((steepness/(steepness+exp(-x-offset+min_dist+(gd^nl*(max_dist-min_dist))+1))))#
+		lines(x,y)#
+		text(1.2+(gd^nl*(max_dist-min_dist))-offset+min_dist,0.5*max_travel,gd,srt=-74)#
+	}#
+}#
+#
+## HOW MANY RUNS BEFORE TAKING QUADRAT#
+n_rounds <- 10#
+#
+n_quadrats <- 15#
+quadrat_size <-50#
+####  ARENA IS x_max x y_max#
+x_min <- 0#
+x_max <- 500#
+y_min <- 0#
+y_max <- 500#
+#### CREATE PHYLO TREE WITH INDIVIDUALS#
+#
+n_default_inds <- 500#
+#
+n_species <- 10#
+####  RUN FROM HERE - NOTHING MORE TO DO#
+#
+library(ape)#
+library(geiger)#
+#
+tree<-rcoal(n_species) # make tree with n_species#
+#
+rstree<-transform(tree,"depth",1) # rescale tree to have root to tip distance of 1.#
+#
+# Assign abundances to species in tree#
+ab<-rlnorm(n_species,2,1)#
+# rescale abundances to be out of n_inds individuals in total#
+abpercent<-ab/sum(ab)*100#
+abdata<-round(abpercent/100*n_default_inds)#
+# replace species that have zero abundance with 1.#
+zeroes<-which(abdata==0)#
+abdata[zeroes]<-1#
+#
+regional.community<-data.frame(species=tree$tip.label,abundance=abdata)#
+#
+# branch lengths between pairs of species#
+phydistmatrix<-sqrt(cophenetic(rstree)/2)#
+#### RANDOMLY PLACE INDS IN THE ARENA#
+#
+n_inds <- sum(regional.community[,2])#
+#
+inds <- data.frame(SPECIES=rep("",n_inds),X=rep(0,n_inds),Y=rep(0,n_inds))#
+inds$SPECIES <- rep(regional.community[,1],regional.community[,2])#
+if (repulsing) {#
+	# Initial area of the arena occupied by the individuals under phylogenetic repulsion.#
+	# change the first term in the first multiplication to zero and the first term in the second multiplication to 1 if I want    	the individuals to occupy the entire arena from the start.#
+	inds$X <- sample(c((0*x_max):(1*x_max)),n_inds, replace=T)#
+	inds$Y <- sample(c((0*y_max):(1*y_max)),n_inds, replace=T)#
+} else {#
+	inds$X <- sample(c((x_max):(x_max)),n_inds, replace=T)#
+	inds$Y <- sample(c((y_max):(y_max)),n_inds, replace=T)#
+}#
+inds$X2 <- inds$X#
+inds$Y2 <- inds$Y#
+inds$REPULSE <- 0#
+inds$SPECIES_NUM <- rep(c(1:nrow(phydistmatrix)),regional.community[,2])#
+library(colorRamps)#
+cols <- blue2green2red(nrow(phydistmatrix))#
+#
+#### FUNCTION TO DEFINE ANGLE AND DISTANCE#
+#
+dir_dist <- function(xy2,xy1) {#
+	distance <- sqrt((xy1[1]-xy2[1])^2 + (xy1[2]-xy2[2])^2)#
+#
+	angle <- atan2((c(xy1[2]-xy2[2])),(c(xy1[1]-xy2[1]))) * 180 / pi#
+	if (angle <0) angle <- 360+angle#
+	angle <- angle-180#
+	if (angle <0) angle <- 360+angle#
+	return(c(distance,angle))#
+}#
+#
+#### FUNCTION TO CALCULATE REPULSION / ATTRACTION#
+#
+repulse <- function(gd, distance, max_dist, nl, steepness) {#
+	repulsion <- max_travel*(1-(steepness/(steepness+exp(-distance-offset+((1-gd)^nl*max_dist)+1))))#
+	return(repulsion)#
+}#
+#
+attract <- function(gd, distance, max_dist, min_dist, nl, steepness) {#
+	attraction <- max_travel*((steepness/(steepness+exp(-distance-offset+(gd^nl*(max_dist-min_dist))+1))))#
+	return(attraction)#
+}#
+#
+#### FUNCTION TO CALCULATE NEWX AND NEWY#
+#
+travel <- function(inputs) {  # inputs <- x, y, angle, repulsion#
+	xy <- inputs[c(1,2)]#
+	angle <- inputs[3]#
+	repulsion <- inputs[4]#
+	if (angle < 180) {#
+		angle <- angle * pi / 180#
+		newx <- xy[1]-repulsion*cos(angle)#
+		newy <- xy[2]-repulsion*sin(angle)#
+	} else {#
+		angle <- angle - 180#
+		angle <- angle * pi / 180#
+		newx <- xy[1]+repulsion*cos(angle)#
+		newy <- xy[2]+repulsion*sin(angle)#
+	}#
+	return(c(newx,newy))#
+#
+}	#
+#
+#### FUNCTION TO ROUND TO +- MAX TRAVEL#
+#
+round_travel <- function(distance) {#
+	if (distance < 0) #
+		return(max(distance,-max_travel))#
+	else#
+		return(min(distance,max_travel))#
+}#
+#
+#### GIVE EACH INDIVIDUAL A CHANCE TO RELOCATE#
+plot(inds$X,inds$Y,pch=20,cex=0.5, xlim=c(0,x_max),ylim=c(0,y_max), col=cols[inds$SPECIES_NUM])#
+for (zz in c(1:n_rounds)) {#
+#
+	for (yy in sample(c(1:nrow(inds)),nrow(inds),replace=FALSE)) {#
+		xy2 <- as.matrix(inds[yy,c(2,3)])#
+		# Put point in center of arena to avoid boundary issues#
+		xy <- xy2#
+		xy[1] <- xy2[1]+(0.5*x_max-xy2[1])#
+		xy[2] <- xy2[2]+(0.5*y_max-xy2[2])#
+		inds$X2 <- inds$X+(0.5*x_max-xy2[1])#
+		inds$Y2 <- inds$Y+(0.5*y_max-xy2[2])#
+		inds$X2[inds$X2 > x_max] <- inds$X2[inds$X2 > x_max]-x_max#
+		inds$Y2[inds$Y2 > y_max] <- inds$Y2[inds$Y2 > y_max]-y_max#
+		inds$X2[inds$X2 < 0] <- inds$X2[inds$X2 < 0]+x_max#
+		inds$Y2[inds$Y2 < 0] <- inds$Y2[inds$Y2 < 0]+y_max#
+		# identify individuals within 15m#
+		distances <- sqrt((inds$X2[yy]-inds$X2[-yy])^2 + (inds$Y2[yy]-inds$Y2[-yy])^2)#
+		if (repulsing) {#
+			locals <- inds[-yy,][distances < max_dist ,]#
+		} else {#
+			locals <- inds[-yy,][distances > min_dist & distances < max_dist ,]#
+		}#
+		if (nrow(locals) > 0) {#
+			# calculate angles, distances and repulsions#
+			distances <- t(apply(as.matrix(locals[,c(4,5)]),1,dir_dist,xy))#
+			if (repulsing) {#
+				repulsions <- repulse(phydistmatrix[inds$SPECIES_NUM[yy],locals$SPECIES_NUM],distances[,1],rep(max_dist,nrow(locals)),rep(nl,nrow(locals)),rep(steepness,nrow(locals)))#
+			} else {#
+				repulsions <- -attract(phydistmatrix[inds$SPECIES_NUM[yy],locals$SPECIES_NUM],distances[,1],rep(max_dist,nrow(locals)),rep(min_dist,nrow(locals)),rep(nl,nrow(locals)),rep(steepness,nrow(locals)))#
+			}#
+			# calculate new xs and ys#
+			inputs <- cbind(rep(xy[1],nrow(locals)),rep(xy[2],nrow(locals)),distances[,2],repulsions)#
+			travels <- t(apply(inputs,1,travel))#
+			x_travel <- round_travel(sum(travels[,1] - (0.5*x_max)))#
+			y_travel <- round_travel(sum(travels[,2] - (0.5*y_max)))#
+			inds$X[yy] <- inds$X[yy] + x_travel#
+			inds$Y[yy] <- inds$Y[yy] + y_travel#
+			inds$X2[yy] <- inds$X2[yy] + x_travel#
+			inds$Y2[yy] <- inds$Y2[yy] + y_travel#
+			if (inds$X[yy] < 0) #
+				inds$X[yy] <- x_max+(x_travel)-xy2[1]#
+			if (inds$X[yy] > x_max)#
+				inds$X[yy] <- inds$X[yy]-x_max#
+			if (inds$Y[yy] < 0) #
+				inds$Y[yy] <- y_max+(y_travel)-xy2[2]#
+			if (inds$Y[yy] > y_max)#
+				inds$Y[yy] <- inds$Y[yy]-y_max#
+			distances <- t(apply(as.matrix(locals[,c(4,5)]),1,dir_dist,as.matrix(inds[yy,c(4,5)])))#
+			inds$REPULSE[yy] <- sum(phydistmatrix[inds$SPECIES_NUM[yy],locals$SPECIES_NUM],distances[,1],max_dist,nl,steepness)#
+		} else {#
+			inds$REPULSE[yy] <- 0#
+		}#
+	}#
+	plot(inds$X,inds$Y,pch=20,cex=0.5, xlim=c(0,x_max),ylim=c(0,y_max), col=cols[inds$SPECIES_NUM])#
+	if (proportion_replaced > 0) {#
+	if (zz < (n_rounds-(0.1*n_rounds))) {#
+		for (i in c(1:(proportion_replaced*n_inds))) {#
+			inds[which.max(inds$REPULSE),]$X <- sample(c(1:x_max),1)#
+			inds[which.max(inds$REPULSE),]$Y <- sample(c(1:y_max),1)#
+			inds[which.max(inds$REPULSE),]$REPULSE <- 0#
+		}	#
+	}#
+	}#
+	print(zz)#
+}#
+#####  TAKE QUADRATS#
+#
+plot(inds$X,inds$Y,pch=20,cex=0.5, xlim=c(0,x_max),ylim=c(0,y_max), col=cols[inds$SPECIES_NUM])#
+#
+quadrat_bounds <- matrix(0,nrow=n_quadrats,ncol=4)#
+colnames(quadrat_bounds) <- c("X1","X2","Y1","Y2")#
+#
+for (i in c(1:n_quadrats)) {#
+#
+	repeat {#
+	OK <- TRUE#
+	quadrat_bounds[i,1] <- sample(c(0:(x_max-quadrat_size)),1)#
+	quadrat_bounds[i,2] <- quadrat_bounds[i,1] + quadrat_size#
+	quadrat_bounds[i,3] <- sample(c(0:(y_max-quadrat_size)),1)#
+	quadrat_bounds[i,4] <- quadrat_bounds[i,3] + quadrat_size#
+	if (i > 1) {#
+	for (j in c(1:(i-1))) {#
+		if (any(#
+			quadrat_bounds[i,1] %in% c(quadrat_bounds[j,1]:quadrat_bounds[j,2]) & quadrat_bounds[i,3] %in% c(quadrat_bounds[j,3]:quadrat_bounds[j,4]),#
+			quadrat_bounds[i,2] %in% c(quadrat_bounds[j,1]:quadrat_bounds[j,2]) & quadrat_bounds[i,3] %in% c(quadrat_bounds[j,3]:quadrat_bounds[j,4]),#
+			quadrat_bounds[i,1] %in% c(quadrat_bounds[j,1]:quadrat_bounds[j,2]) & quadrat_bounds[i,4] %in% c(quadrat_bounds[j,3]:quadrat_bounds[j,4]),#
+			quadrat_bounds[i,2] %in% c(quadrat_bounds[j,1]:quadrat_bounds[j,2]) & quadrat_bounds[i,4] %in% c(quadrat_bounds[j,3]:quadrat_bounds[j,4])#
+			)) {#
+			OK <- FALSE#
+		}#
+	}#
+	}#
+	if (OK == TRUE) {#
+		break;#
+	}#
+	}#
+	polygon(c(quadrat_bounds[i,1],quadrat_bounds[i,2],quadrat_bounds[i,2],quadrat_bounds[i,1]),c(quadrat_bounds[i,3],quadrat_bounds[i,3],quadrat_bounds[i,4],quadrat_bounds[i,4]))#
+#
+}#
+#####  RECORD WHATS IN QUADRATS, RETURNING A DATA FRAME#
+#
+species <- unique(inds$SPECIES)#
+results <- matrix(0, ncol=n_quadrats, nrow=length(species))#
+rownames(results) <- species#
+#
+for (i in c(1:n_quadrats)) {#
+#
+	in_quadrat <- inds$SPECIES[inds$X >= quadrat_bounds[i,1] & inds$X <= quadrat_bounds[i,2] & inds$Y >= quadrat_bounds[i,3] & inds$Y <= quadrat_bounds[i,4]]#
+#
+	for (j in c(1:length(species))) {#
+		results[j,i] <- sum(in_quadrat == species[j])#
+	}#
+#
+}#
+#
+results
+library(picante)
+mnt
+mntd
+library(plyr)
+null.output <- data.frame(richness = factor(rep(2:8, 4)),#
+                          metric = rnorm(28, 10, 1),#
+                          metric2 = rnorm(28, 1, 1),#
+                          metric3 = rnorm(7.5, 1, 1))
+null.output
+f <- function(v) c(iterations = length(v),#
+                   average = mean(v, na.rm = TRUE),#
+                   lower = quantile(v, 0.025, na.rm = TRUE),#
+                   upper = quantile(v, 0.975, na.rm = TRUE))
+f
+u <- ddply(null.output, .(richness), numcolwise(f))
+u
+summnames <- c("iterations", "average", "lower", "upper")
+u$summary <- summnames
+head(u)
+u
+summfun <- function(d)#
+{#
+     # Create the output variable names#
+     vars <- names(d)[grepl("metric", names(d))]#
+     snames <- c("iterations", "average", "lower", "upper")#
+     vnames <- paste(rep(vars, each = length(summnames)),#
+                     rep(snames, length(vars)), sep = ".")#
+#
+     # Function to be applied to each variable#
+     g <- function(x) c(length(x), mean(x, na.rm = TRUE),#
+                        quantile(x, c(0.025, 0.975), na.rm = TRUE))#
+#
+     # Convert the numeric part of the data frame to matrix#
+     # and then apply the function g to each column#
+     L <- apply(data.matrix(d[, vars]), 2, g)#
+#
+     # String the matrix in column order to a vector, attach#
+     # the names to it, then return#
+     v <- as.vector(L)#
+     names(v) <- vnames#
+     v#
+}
+w <- ddply(null.output, .(richness), summfun)
+w
+library(reshape2)
+dm <- melt(w, id = "richness")
+dm
+dcast(dm, variable ~ richness, value.var = "value")
+?dcast
+null.outptu
+null.output
+?grepl
+?rep
+w
+dcast(dm, variable ~ richness, value.var = "value")
+grepl("metric", names(null.output))
+library(geiger)
+mcom.numsp<-100
+phylo<-rcoal(mcom.numsp) # ape package
+plot(phylo)
+stretch<-runif(1,0.1,100)#
+#
+phylo<-transform(phylo,"delta",stretch) # geiger package
+plot(phylo)
+tree <- sim.bdtree(b=0.1, d=0, stop="taxa", n=no.of.taxa)
+no.of.taxa=50
+tree <- sim.bdtree(b=0.1, d=0, stop="taxa", n=no.of.taxa)
+plot(tree)
+550*2*3.5*1/25
+5*42
+230+20+119+504+210
+?sample
+40-10
+30*50000
+this is the code to run all final analyses for the Meliphagid manuscript for phylo#
+##community structure across australia with the phylogeny of uncorrected molecular#
+##divergences, provided to us#
+##by arpi, and then modified by me to include some species (for which we made up#
+##branch lengths according to code in another text file in this same folder) and to #
+##include the topology of the Melithreptus per Toon et al. note that there have been many#
+##previous versions of this script. this is the version that will be used to generate#
+##the revision, due 18 Feb, to Ecology Letters. a major change from previous versions#
+##is that I am now using Atlas of Living Australia data. have tried to generalize many#
+##functions, etc., so that can deal with different datasets an situations, but still a lot#
+##of unique, situation-specific fiddling of data tables in here#
+#
+##set your working directory manually#
+#
+library(hdrcde)#
+library(plyr)#
+library(phytools)#
+library(picante)#
+library(plotrix)#
+library(vegan)#
+library(fitContinuousMCMC)#
+#
+meliphagidae_initial <- read.tree("meli3.tre")#
+#
+##bring in the taxonomically and spatially cleaned meliphagidae database, with associated notes. i could use the hashed out read.csv() below, but it loads more slowly than read.table(). however, note that this argument will need to be carefully modified if you ever change the raw data input. your date is coming in as a factor, you'll have to coerce it to POSIXlt if you ever want to use it#
+#
+raw.coll <- read.table("meli_final_output.txt", header=TRUE, sep=",", nrows=2266013, colClasses=c("integer", rep("factor", 7), rep("numeric", 2), rep("factor", 3), "numeric", rep("factor", 7), rep("numeric", 3)), comment.char="")#
+#
+##raw.coll <- read.csv("meli_final_output.txt")#
+#
+##rename the columns to reflect which grid cell they came from (they were output with weird names from GIS). note that after this step i usually refer to and perform functions on 50 before 200.#
+#
+names(raw.coll)[22] = "ID_100"#
+names(raw.coll)[23] = "ID_200"#
+names(raw.coll)[24] = "ID_50"#
+#
+##create community data matrices (CDMs). start by simply summarizing the raw collections into grid cell occurrences. note that there will be two forms of this, one where occurrences are simply number of points per grid cell, and another where "occurrences" are sum of counts per grid cell#
+##the idata.frame command seems to speed the hell up out of this (about a 3 fold difference when i tested it last). #
+##however, it stopped working with a recent R update, so i had to hash those out. that made it run unbearably slow, so i am minimizing the database before running these#
+#
+##the second argument of the ddply function (the c("grid","species")), splits it first by grid, then by species. works great, did a test run with a smaller dataset#
+#
+raw.coll2 <- data.frame(raw.coll$Species_Cleaned, raw.coll$Count_, raw.coll$ID_100, raw.coll$ID_200, raw.coll$ID_50)#
+#
+names(raw.coll2) <- c("Species_Cleaned", "Count_", "ID_100", "ID_200", "ID_50")#
+#
+rm(raw.coll)#
+#
+##this clears the memory (at least somewhat)#
+#
+gc()#
+#
+##cdm.onehund.ini <- ddply(idata.frame(raw.coll), c("ID_100","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+##cdm.fifty.ini <- ddply(idata.frame(raw.coll), c("ID_50","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+##cdm.twohund.ini <- ddply(idata.frame(raw.coll), c("ID_200","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+#
+cdm.onehund.ini <- ddply(raw.coll2, c("ID_100","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+cdm.fifty.ini <- ddply(raw.coll2, c("ID_50","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+cdm.twohund.ini <- ddply(raw.coll2, c("ID_200","Species_Cleaned"), summarise, occurrences=length(Count_), count=sum(Count_))#
+#
+##the following two commands, which I will normally keep hashed out, will generate and save pdfs of the abundance curves for all species#
+##before any cuts for effort or land area#
+#
+#taxa <- unique(cdm.fifty.ini$Species_Cleaned)#
+#
+#for(i in 1:75)#
+##{#
+##	filename <- paste(as.character(taxa[i]), "pdf", sep=".")#
+##	pdf(file = filename)#
+##	hist(log10(cdm.fifty.ini$count[cdm.fifty.ini$Species_Cleaned==taxa[i]]), main = "Log10 of total counts per 50x50 km grid", xlab=taxa[i])#
+##	dev.off()#
+##}#
+#
+##continue processing your CDMs. start with just the occurrences#
+#
+cdm.occ.onehund <- data.frame(cdm.onehund.ini$ID_100, cdm.onehund.ini$occurrences, cdm.onehund.ini$Species_Cleaned)#
+cdm.occ.fifty <- data.frame(cdm.fifty.ini$ID_50, cdm.fifty.ini$occurrences, cdm.fifty.ini$Species_Cleaned)#
+cdm.occ.twohund <- data.frame(cdm.twohund.ini$ID_200, cdm.twohund.ini$occurrences, cdm.twohund.ini$Species_Cleaned)#
+#
+##simplify the names of the columns#
+#
+names(cdm.occ.onehund) <- c("V1","V2","V3")#
+names(cdm.occ.fifty) <- c("V1","V2","V3")#
+names(cdm.occ.twohund) <- c("V1","V2","V3")#
+#
+##repeat for the actual counts#
+#
+cdm.count.onehund <- data.frame(cdm.onehund.ini$ID_100, cdm.onehund.ini$count, cdm.onehund.ini$Species_Cleaned)#
+cdm.count.fifty <- data.frame(cdm.fifty.ini$ID_50, cdm.fifty.ini$count, cdm.fifty.ini$Species_Cleaned)#
+cdm.count.twohund <- data.frame(cdm.twohund.ini$ID_200, cdm.twohund.ini$count, cdm.twohund.ini$Species_Cleaned)#
+#
+##simplify the names of the columns#
+#
+names(cdm.count.onehund) <- c("V1","V2","V3")#
+names(cdm.count.fifty) <- c("V1","V2","V3")#
+names(cdm.count.twohund) <- c("V1","V2","V3")#
+#
+##make a table of the number of observations made in each grid. start with just occurrences#
+#
+coll.occ.onehund <- ddply(cdm.onehund.ini, "ID_100", summarise, observations=sum(occurrences))#
+coll.occ.fifty <- ddply(cdm.fifty.ini, "ID_50", summarise, observations=sum(occurrences))#
+coll.occ.twohund <- ddply(cdm.twohund.ini, "ID_200", summarise, observations=sum(occurrences))#
+#
+##repeat for the actual counts#
+#
+coll.count.onehund <- ddply(cdm.onehund.ini, "ID_100", summarise, observations=sum(count))#
+coll.count.fifty <- ddply(cdm.fifty.ini, "ID_50", summarise, observations=sum(count))#
+coll.count.twohund <- ddply(cdm.twohund.ini, "ID_200", summarise, observations=sum(count))#
+#
+##and a table of the number of species in each grid#
+#
+rich.onehund <- ddply(cdm.onehund.ini, "ID_100", summarise, richness=length(occurrences))#
+rich.fifty <- ddply(cdm.fifty.ini, "ID_50", summarise, richness=length(occurrences))#
+rich.twohund <- ddply(cdm.twohund.ini, "ID_200", summarise, richness=length(occurrences))#
+#
+##use the vegan function estimateR to extrapolate the expected species richness for each site based on the abundances at that site. this function takes a standard CDM, so convert to that format using picante's sample2matrix function. begin with just the occurrences#
+#
+est.occ.onehund <- estimateR(sample2matrix(cdm.occ.onehund))#
+est.occ.fifty <- estimateR(sample2matrix(cdm.occ.fifty))#
+est.occ.twohund <- estimateR(sample2matrix(cdm.occ.twohund))#
+#
+##move on to counts.#
+#
+est.count.onehund <- estimateR(sample2matrix(cdm.count.onehund))#
+est.count.fifty <- estimateR(sample2matrix(cdm.count.fifty))#
+est.count.twohund <- estimateR(sample2matrix(cdm.count.twohund))#
+#
+##the piece we are most interested in from these estimated species richnesses is the second row of the matrix, the S.chao1. for whatever reason, the ACE estimate of species richness spits a lot of NAs, so we won't use that one.#
+##another thing of note here is that grid cells with a single count of a single bird seem to be interpreted as having only one species. so we'll need to find some minimum number of counts necessary independent of the rarefaction (e.g. >5 counts)#
+##generate a vector of the percentage observed of the expected species. begin with occurrences#
+#
+percent.occ.onehund <- est.occ.onehund[1,]/est.occ.onehund[2,]#
+percent.occ.fifty <- est.occ.fifty[1,]/est.occ.fifty[2,]#
+percent.occ.twohund <- est.occ.twohund[1,]/est.occ.twohund[2,]#
+#
+##move on to actual counts#
+#
+percent.count.onehund <- est.count.onehund[1,]/est.count.onehund[2,]#
+percent.count.fifty <- est.count.fifty[1,]/est.count.fifty[2,]#
+percent.count.twohund <- est.count.twohund[1,]/est.count.twohund[2,]#
+#
+##determined maximum species richness per grid cell#
+#
+##subset the collections to only those grids with at least 34 collections for 100, 33 for fifty, and 37 for twohund. use  these numbers are arbitrary, but can make a decent verbal argument as to the reasons why I chose them (would never be able to count the maximum number of species in a grid cell without at least the number of observations as that many species)#
+##more importantly, do need to cut it above 1, at bare minimum, due to problem noted above in rarefaction section. in practice, making these small cuts would only remove--after the counts we'll be making anyhow for rarefaction--an additional ~4% of the remaining cells at 100km, 17% at 50km, and 2% at 200km.#
+#
+min_collections.onehund <- subset(coll.occ.onehund, observations > 33)#
+min_collections.fifty <- subset(coll.occ.fifty, observations > 32)#
+min_collections.twohund <- subset(coll.occ.twohund, observations > 36)#
+#
+##doing this goes from 100 km cells: 890 -> 852#
+##50 km cells: 3238 -> 2435#
+##200 km cells: 253 -> 247#
+#
+##make a vector of the grid ids that meet this requirement#
+#
+grdid.onehund <- min_collections.onehund$ID_100#
+grdid.fifty <- min_collections.fifty$ID_50#
+grdid.twohund <- min_collections.twohund$ID_200#
+#
+##the following is very neat code. what it does is subset the cdm to all cases where#
+##the left operand (cdm_initial$V1) matches the vector grdid#
+#
+cdm.occ.onehund <- subset(cdm.occ.onehund, cdm.occ.onehund$V1 %in% grdid.onehund)#
+cdm.occ.fifty <- subset(cdm.occ.fifty, cdm.occ.fifty$V1 %in% grdid.fifty)#
+cdm.occ.twohund <- subset(cdm.occ.twohund, cdm.occ.twohund$V1 %in% grdid.twohund)#
+#
+cdm.count.onehund <- subset(cdm.count.onehund, cdm.count.onehund$V1 %in% grdid.onehund)#
+cdm.count.fifty <- subset(cdm.count.fifty, cdm.count.fifty$V1 %in% grdid.fifty)#
+cdm.count.twohund <- subset(cdm.count.twohund, cdm.count.twohund$V1 %in% grdid.twohund)#
+#
+##now make the cuts based on the rarefaction analysis. 90% seems like a very believable number and it doesn't lose an ungodly number of cells. HOWEVER! cell 607 in the 100km grid cell size is estimated to have 84% of species sampled. this is the only cell with Lichenostomus_hindwoodi in it. tried first running the analysis with 84%, but it let quite a bit of slop in. instead, add grid cell 607 in manually. begin with occurrences#
+#
+cdm.occ.onehund <- cdm.occ.onehund[cdm.occ.onehund$V1 %in% c(names(percent.occ.onehund[percent.occ.onehund > 0.9]), 607), ]#
+cdm.occ.fifty <- cdm.occ.fifty[cdm.occ.fifty$V1 %in% names(percent.occ.fifty[percent.occ.fifty > 0.9]), ]#
+cdm.occ.twohund <- cdm.occ.twohund[cdm.occ.twohund$V1 %in% names(percent.occ.twohund[percent.occ.twohund > 0.9]), ]#
+#
+##now move on to counts#
+#
+cdm.count.onehund <- cdm.count.onehund[cdm.count.onehund$V1 %in% names(percent.count.onehund[percent.count.onehund > 0.9]), ]#
+cdm.count.fifty <- cdm.count.fifty[cdm.count.fifty$V1 %in% names(percent.count.fifty[percent.count.fifty > 0.9]), ]#
+cdm.count.twohund <- cdm.count.twohund[cdm.count.twohund$V1 %in% names(percent.count.twohund[percent.count.twohund > 0.9]), ]#
+#
+##pull out the final gridids you will use. begin with occurrences#
+#
+grdid.occ.onehund <- unique(cdm.occ.onehund$V1)#
+grdid.occ.fifty <- unique(cdm.occ.fifty$V1)#
+grdid.occ.twohund <- unique(cdm.occ.twohund$V1)#
+#
+##move on to counts#
+#
+grdid.count.onehund <- unique(cdm.count.onehund$V1)#
+grdid.count.fifty <- unique(cdm.count.fifty$V1)#
+grdid.count.twohund <- unique(cdm.count.twohund$V1)#
+#
+##calculate Shannon diversity indices for all the different grid cells so that you can calculate Pielou's evenness index. begin with occurrences#
+#
+H.occ.onehund <- diversity(sample2matrix(cdm.occ.onehund))#
+H.occ.fifty <- diversity(sample2matrix(cdm.occ.fifty))#
+H.occ.twohund <- diversity(sample2matrix(cdm.occ.twohund))#
+#
+##move on to counts#
+#
+H.count.onehund <- diversity(sample2matrix(cdm.count.onehund))#
+H.count.fifty <- diversity(sample2matrix(cdm.count.fifty))#
+H.count.twohund <- diversity(sample2matrix(cdm.count.twohund))#
+#
+##I NO LONGER CARE TO MAKE CUTS BASED ON PERCENT LAND AFTER THE RAREFACTION ANALYSIS, so that section of the code has been removed. see old archived files for this code if necessary#
+#
+##bring in the biomeans for all three size grid cells#
+#
+biomeans.onehund <- read.csv("biomeans_onehund.csv", header=TRUE, sep=",")#
+biomeans.fifty <- read.csv("biomeans_fifty.csv", header=TRUE, sep=",")#
+biomeans.twohund <- read.csv("biomeans_twohund.csv", header=TRUE, sep=",")#
+#
+##use picante's sample2matrix function to convert the phylocom style matrix#
+##into a picante matrix#
+#
+cdm.occ.onehund <- sample2matrix(cdm.occ.onehund)#
+cdm.occ.fifty <- sample2matrix(cdm.occ.fifty)#
+cdm.occ.twohund <- sample2matrix(cdm.occ.twohund)#
+#
+cdm.count.onehund <- sample2matrix(cdm.count.onehund)#
+cdm.count.fifty <- sample2matrix(cdm.count.fifty)#
+cdm.count.twohund <- sample2matrix(cdm.count.twohund)#
+#
+##FYI this function isn't actually doing anything, since it's pruning according to#
+##the column names in the cdm, and there is a column in there for all taxa, includ-#
+##ing any that were cut in the above processes#
+#
+meliphagidae <- prune.sample(cdm.occ.onehund,meliphagidae_initial)#
+#
+##calculate all pair-wise distances between taxa#
+#
+dists <- cophenetic(meliphagidae)#
+#
+##now subset the biomeans to only those grd cells we will analyze (based on cuts#
+##above). begin with occurrences (remember that these are slightly dissimilar sets of grdids so need to keep separate the whole way)#
+##importantly, for reasons i can't quite figure out, all the biomeans files are missing between 1 and 3 rows worth of environmental data as compared to the grid cells i want to analyze. lose a very small proportion here of samples, for reasons i can't figure out #
+#
+biomeans.occ.onehund <- subset(biomeans.onehund, biomeans.onehund$id %in% grdid.occ.onehund)#
+biomeans.occ.fifty <- subset(biomeans.fifty, biomeans.fifty$gridcell %in% grdid.occ.fifty)#
+biomeans.occ.twohund <- subset(biomeans.twohund, biomeans.twohund$gridcell %in% grdid.occ.twohund)#
+#
+##move on to counts.#
+#
+biomeans.count.onehund <- subset(biomeans.onehund, biomeans.onehund$id %in% grdid.count.onehund)#
+biomeans.count.fifty <- subset(biomeans.fifty, biomeans.fifty$gridcell %in% grdid.count.fifty)#
+biomeans.count.twohund <- subset(biomeans.twohund, biomeans.twohund$gridcell %in% grdid.count.twohund)#
+#
+##define the modified MPD function#
+#
+modified.mpd <- function (samp, dis, abundance.weighted = FALSE) #
+{#
+    N <- dim(samp)[1]#
+    mpd <- numeric(N)#
+    for (i in 1:N) {#
+        sppInSample <- names(samp[i, samp[i, ] > 0])#
+        if (length(sppInSample) > 1) {#
+            sample.dis <- dis[sppInSample, sppInSample]#
+            if (abundance.weighted == "interspecific") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+	            diag(sample.weights) <- 0#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else if (abundance.weighted == "intraspecific") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+	            diag(sample.weights) <- diag(sample.weights) - sqrt(diag(sample.weights))#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else if (abundance.weighted == "complete") {#
+                sample.weights <- t(as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])) %*% as.matrix(samp[i, sppInSample, #
+                  drop = FALSE])#
+                mpd[i] <- weighted.mean(sample.dis, sample.weights)#
+            }#
+            else {#
+                mpd[i] <- mean(sample.dis[lower.tri(sample.dis)])#
+            }#
+        }#
+        else {#
+            mpd[i] <- NA#
+        }#
+    }#
+    mpd#
+}#
+#
+##calculate non-abundance-weighted mean pairwise distance for these grid cells. note that you could use either cdm.occ or cdm.count here IF they were the same grid cells that you'll bind back to later. But because they are different, have to re-run it for both#
+#
+noabund.MPD.occ.onehund <- modified.mpd(cdm.occ.onehund, dists, abundance.weighted=FALSE)#
+noabund.MPD.occ.fifty <- modified.mpd(cdm.occ.fifty, dists, abundance.weighted=FALSE)#
+noabund.MPD.occ.twohund <- modified.mpd(cdm.occ.twohund, dists, abundance.weighted=FALSE)#
+#
+##re-run it for counts#
+#
+noabund.MPD.count.onehund <- modified.mpd(cdm.count.onehund, dists, abundance.weighted=FALSE)#
+noabund.MPD.count.fifty <- modified.mpd(cdm.count.fifty, dists, abundance.weighted=FALSE)#
+noabund.MPD.count.twohund <- modified.mpd(cdm.count.twohund, dists, abundance.weighted=FALSE)#
+#
+##calculate interspecific-abundance-weighted MPD on the occurrence cdms#
+#
+inter.MPD.occ.onehund <- modified.mpd(cdm.occ.onehund, dists, abundance.weighted="interspecific")#
+inter.MPD.occ.fifty <- modified.mpd(cdm.occ.fifty, dists, abundance.weighted="interspecific")#
+inter.MPD.occ.twohund <- modified.mpd(cdm.occ.twohund, dists, abundance.weighted="interspecific")#
+#
+##calculate interspecific-abundance-weighted MPD on the count cdms. #
+#
+inter.MPD.count.onehund <- modified.mpd(cdm.count.onehund, dists, abundance.weighted="interspecific")#
+inter.MPD.count.fifty <- modified.mpd(cdm.count.fifty, dists, abundance.weighted="interspecific")#
+inter.MPD.count.twohund <- modified.mpd(cdm.count.twohund, dists, abundance.weighted="interspecific")#
+#
+##calculate intraspecific-abundance-weighted MPD on the occurrence cdms#
+#
+intra.MPD.occ.onehund <- modified.mpd(cdm.occ.onehund, dists, abundance.weighted="intraspecific")#
+intra.MPD.occ.fifty <- modified.mpd(cdm.occ.fifty, dists, abundance.weighted="intraspecific")#
+intra.MPD.occ.twohund <- modified.mpd(cdm.occ.twohund, dists, abundance.weighted="intraspecific")#
+#
+##calculate intraspecific-abundance-weighted MPD on the count cdms. #
+#
+intra.MPD.count.onehund <- modified.mpd(cdm.count.onehund, dists, abundance.weighted="intraspecific")#
+intra.MPD.count.fifty <- modified.mpd(cdm.count.fifty, dists, abundance.weighted="intraspecific")#
+intra.MPD.count.twohund <- modified.mpd(cdm.count.twohund, dists, abundance.weighted="intraspecific")#
+#
+##calculate complete-abundance-weighted MPD on the occurrence cdms#
+#
+complete.MPD.occ.onehund <- modified.mpd(cdm.occ.onehund, dists, abundance.weighted="complete")#
+complete.MPD.occ.fifty <- modified.mpd(cdm.occ.fifty, dists, abundance.weighted="complete")#
+complete.MPD.occ.twohund <- modified.mpd(cdm.occ.twohund, dists, abundance.weighted="complete")#
+#
+##calculate complete-abundance-weighted MPD on the count cdms#
+#
+complete.MPD.count.onehund <- modified.mpd(cdm.count.onehund, dists, abundance.weighted="complete")#
+complete.MPD.count.fifty <- modified.mpd(cdm.count.fifty, dists, abundance.weighted="complete")#
+complete.MPD.count.twohund <- modified.mpd(cdm.count.twohund, dists, abundance.weighted="complete")#
+#
+##pull out only those richnesses that went into the analysis. begin with occurrences#
+#
+rich.occ.onehund <- subset(rich.onehund, rich.onehund$ID_100 %in% grdid.occ.onehund)#
+rich.occ.fifty <- subset(rich.fifty, rich.fifty$ID_50 %in% grdid.occ.fifty)#
+rich.occ.twohund <- subset(rich.twohund, rich.twohund$ID_200 %in% grdid.occ.twohund)#
+#
+##move on to counts#
+#
+rich.count.onehund <- subset(rich.onehund, rich.onehund$ID_100 %in% grdid.count.onehund)#
+rich.count.fifty <- subset(rich.fifty, rich.fifty$ID_50 %in% grdid.count.fifty)#
+rich.count.twohund <- subset(rich.twohund, rich.twohund$ID_200 %in% grdid.count.twohund)#
+#
+##make some temporary results files. begin with occurrences#
+##because of the problem where some biomeans are missing, you'll need to chop the results to those later, so can't bind biomeans in yet#
+##NOTICE ALSO THAT WE CALCULATE the EVENNESS INDEX IN THE LAST COLUMN AS THE SHANNON INDEX DIVIDED BY THE LOG OF SPECIES RICHNESS#
+#
+temp.results.occ.onehund <- data.frame(grdid.occ.onehund, noabund.MPD.occ.onehund, inter.MPD.occ.onehund, intra.MPD.occ.onehund, complete.MPD.occ.onehund, rich.occ.onehund$richness, H.occ.onehund, H.occ.onehund/log(rich.occ.onehund$richness))#
+temp.results.occ.fifty <- data.frame(grdid.occ.fifty, noabund.MPD.occ.fifty, inter.MPD.occ.fifty, intra.MPD.occ.fifty, complete.MPD.occ.fifty, rich.occ.fifty$richness, H.occ.fifty, H.occ.fifty/log(rich.occ.fifty$richness))#
+temp.results.occ.twohund <- data.frame(grdid.occ.twohund, noabund.MPD.occ.twohund, inter.MPD.occ.twohund, intra.MPD.occ.twohund, complete.MPD.occ.twohund, rich.occ.twohund$richness, H.occ.twohund, H.occ.twohund/log(rich.occ.twohund$richness))#
+#
+##move on to counts#
+#
+temp.results.count.onehund <- data.frame(grdid.count.onehund, noabund.MPD.count.onehund, inter.MPD.count.onehund, intra.MPD.count.onehund, complete.MPD.count.onehund, rich.count.onehund$richness, H.count.onehund, H.count.onehund/log(rich.count.onehund$richness))#
+temp.results.count.fifty <- data.frame(grdid.count.fifty, noabund.MPD.count.fifty, inter.MPD.count.fifty, intra.MPD.count.fifty, complete.MPD.count.fifty, rich.count.fifty$richness, H.count.fifty, H.count.fifty/log(rich.count.fifty$richness))#
+temp.results.count.twohund <- data.frame(grdid.count.twohund, noabund.MPD.count.twohund, inter.MPD.count.twohund, intra.MPD.count.twohund, complete.MPD.count.twohund, rich.count.twohund$richness, H.count.twohund, H.count.twohund/log(rich.count.twohund$richness))#
+#
+##now cut them to the biomeans you actually have. begin with occurrences#
+#
+results.occ.onehund <- subset(temp.results.occ.onehund, temp.results.occ.onehund$grdid.occ.onehund %in% biomeans.occ.onehund$id)#
+results.occ.fifty <- subset(temp.results.occ.fifty, temp.results.occ.fifty$grdid.occ.fifty %in% biomeans.occ.fifty$gridcell)#
+results.occ.twohund <- subset(temp.results.occ.twohund, temp.results.occ.twohund$grdid.occ.twohund %in% biomeans.occ.twohund$gridcell)#
+#
+##move on to counts#
+#
+results.count.onehund <- subset(temp.results.count.onehund, temp.results.count.onehund$grdid.count.onehund %in% biomeans.count.onehund$id)#
+results.count.fifty <- subset(temp.results.count.fifty, temp.results.count.fifty$grdid.count.fifty %in% biomeans.count.fifty$gridcell)#
+results.count.twohund <- subset(temp.results.count.twohund, temp.results.count.twohund$grdid.count.twohund %in% biomeans.count.twohund$gridcell)#
+#
+##bind the biomeans in. first occurrences#
+#
+results.occ.onehund <- cbind(biomeans.occ.onehund, results.occ.onehund)#
+results.occ.fifty <- cbind(biomeans.occ.fifty, results.occ.fifty)#
+results.occ.twohund <- cbind(biomeans.occ.twohund, results.occ.twohund)#
+#
+##then counts#
+#
+results.count.onehund <- cbind(biomeans.count.onehund, results.count.onehund)#
+results.count.fifty <- cbind(biomeans.count.fifty, results.count.fifty)#
+results.count.twohund <- cbind(biomeans.count.twohund, results.count.twohund)#
+#
+##delete the duplicate grdid columns and fix the names up nice for all results files#
+#
+results.occ.onehund[,21] <- NULL#
+results.occ.fifty[,60] <- NULL#
+results.occ.twohund[,60] <- NULL#
+#
+results.count.onehund[,21] <- NULL#
+results.count.fifty[,60] <- NULL#
+results.count.twohund[,60] <- NULL#
+#
+names(results.occ.onehund)[21:27] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+names(results.occ.fifty)[60:66] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+names(results.occ.twohund)[60:66] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+#
+names(results.count.onehund)[21:27] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+names(results.count.fifty)[60:66] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+names(results.count.twohund)[60:66] <- c("noabund.MPD", "inter.MPD", "intra.MPD", "complete.MPD", "richness", "shannon", "evenness")#
+#
+##at this point i've decided to stop using the real counts, as the effort per point isn't comparable between collecting, observations where people counted individuals, and observations where they just noted presence absence. will instead just use occurrences from here out#
+#
+##take the cdm files, turn them back into phylocom style cdms instead of current#
+##state, and change the col name so that we have a column to merge#
+##it with and with biomeans files#
+#
+cdm.onehund.ini <- matrix2sample(cdm.occ.onehund)#
+cdm.fifty.ini <- matrix2sample(cdm.occ.fifty)#
+cdm.twohund.ini <- matrix2sample(cdm.occ.twohund)#
+#
+names(cdm.onehund.ini) = c("id","abund","species")#
+names(cdm.fifty.ini) = c("id","abund","species")#
+names(cdm.twohund.ini) = c("id","abund","species")#
+#
+##cut down to only those cells you have climatic data for#
+#
+cdm.onehund.ini <- subset(cdm.onehund.ini, cdm.onehund.ini$id %in% biomeans.occ.onehund$id)#
+cdm.fifty.ini <- subset(cdm.fifty.ini, cdm.fifty.ini$id %in% biomeans.occ.fifty$gridcell)#
+cdm.twohund.ini <- subset(cdm.twohund.ini, cdm.twohund.ini$id %in% biomeans.occ.twohund$gridcell)#
+#
+##now get the names of the biomeans files into order as well#
+#
+names(biomeans.occ.fifty)[1] = "id"#
+names(biomeans.occ.twohund)[1] = "id"#
+#
+##merge the files#
+#
+combo.onehund <- merge(cdm.onehund.ini, biomeans.occ.onehund, by="id")#
+combo.fifty <- merge(cdm.fifty.ini, biomeans.occ.fifty, by="id")#
+combo.twohund <- merge(cdm.twohund.ini, biomeans.occ.twohund, by="id")#
+#
+##order it by species. from here on proceeding as if running analysis only#
+##with 100 km grids#
+#
+combo.onehund <- combo.onehund[order(combo.onehund$species), ]#
+#
+##the following is a bit of a cheap fix, but since i know that bio1 will be a#
+##variable we are interested in, and since i know that it needs to be divided #
+##by 10 (others do as well but not interested), will do here#
+#
+combo.onehund$bio1mean <- combo.onehund$bio1mean/10#
+#
+##derive both the species' level averages and the species' minima for all bioclim#
+#
+bio1niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio1mean))#
+bio2niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio2mean))#
+bio3niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio3mean))#
+bio4niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio4mean))#
+bio5niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio5mean))#
+bio6niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio6mean))#
+bio7niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio7mean))#
+bio8niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio8mean))#
+bio9niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio9mean))#
+bio10niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio10mean))#
+bio11niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio11mean))#
+bio12niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio12mean))#
+bio13niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio13mean))#
+bio14niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio14mean))#
+bio15niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio15mean))#
+bio16niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio16mean))#
+bio17niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio17mean))#
+bio18niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio18mean))#
+bio19niche <- ddply(combo.onehund, "species", summarise, niche=mean(bio19mean))#
+#
+bio1min <- ddply(combo.onehund, "species", summarise, min=min(bio1mean))#
+bio2min <- ddply(combo.onehund, "species", summarise, min=min(bio2mean))#
+bio3min <- ddply(combo.onehund, "species", summarise, min=min(bio3mean))#
+bio4min <- ddply(combo.onehund, "species", summarise, min=min(bio4mean))#
+bio5min <- ddply(combo.onehund, "species", summarise, min=min(bio5mean))#
+bio6min <- ddply(combo.onehund, "species", summarise, min=min(bio6mean))#
+bio7min <- ddply(combo.onehund, "species", summarise, min=min(bio7mean))#
+bio8min <- ddply(combo.onehund, "species", summarise, min=min(bio8mean))#
+bio9min <- ddply(combo.onehund, "species", summarise, min=min(bio9mean))#
+bio10min <- ddply(combo.onehund, "species", summarise, min=min(bio10mean))#
+bio11min <- ddply(combo.onehund, "species", summarise, min=min(bio11mean))#
+bio12min <- ddply(combo.onehund, "species", summarise, min=min(bio12mean))#
+bio13min <- ddply(combo.onehund, "species", summarise, min=min(bio13mean))#
+bio14min <- ddply(combo.onehund, "species", summarise, min=min(bio14mean))#
+bio15min <- ddply(combo.onehund, "species", summarise, min=min(bio15mean))#
+bio16min <- ddply(combo.onehund, "species", summarise, min=min(bio16mean))#
+bio17min <- ddply(combo.onehund, "species", summarise, min=min(bio17mean))#
+bio18min <- ddply(combo.onehund, "species", summarise, min=min(bio18mean))#
+bio19min <- ddply(combo.onehund, "species", summarise, min=min(bio19mean))#
+#
+##there was here a huge section of functioning, useful code involving bringing in the HANZAB morphological data, and running PICs of climate and body size, and of checking the phylogenetic signal, the trait community structure, and mean root distance, that I've deleted. Remains in previous versions of this script file#
+#
+#############RUN THE ANCESTRAL STATE RECONSTRUCTION#################
+#
+##per suggestions on http://www.r-phylo.org/wiki/HowTo/Ancestral_State_Reconstruction , will pull out trait data, then associate the row names with it#
+#
+name.vector <- bio1niche$species#
+#
+bio1niche <- bio1niche$niche#
+names(bio1niche) <- name.vector#
+#
+##take the log base 10 of mean annual precipitation here too, since the following code assumes we're using logged values#
+#
+bio12niche <- log10(bio12niche$niche)#
+names(bio12niche) <- name.vector#
+#
+##VERY IMPORTANT TO SORT THESE BY THE ORDER OF THE PHYLOGENY#
+#
+bio1niche <- bio1niche[meliphagidae$tip.label]#
+#
+bio12niche <- bio12niche[meliphagidae$tip.label]#
+#
+##when I first developed this code, I used method=ML. However, since then, REML has#
+##been introduced to the ace code. The ace manual recommends this method. Run both#
+##and compare results. NOTE THAT THE BIO1 model has a negative log likelihood score#
+#
+ML.bio1 <- ace(bio1niche, meliphagidae, type="continuous", method="ML")#
+ML.bio12 <- ace(bio12niche, meliphagidae, type="continuous", method="ML")#
+#
+##extrapolate the logged precip results into real precip. call the root#
+#
+root.ML.bio12 <- 10^ML.bio12$ace[1]#
+#
+##run the REML. note that results are very similar#
+#
+REML.bio1 <- ace(bio1niche, meliphagidae, type="continuous", method="REML")#
+REML.bio12 <- ace(bio12niche, meliphagidae, type="continuous", method="REML")#
+#
+root.REML.bio12 <- 10^REML.bio12$ace[1]#
+#
+##use the fitContinuousMCMC package to put a prior on the root and reconstruct using a trend model of evolution. the mean is the log10 of the midpoint of D. Greenwood's estimate, the sd was chosen such that 2 sd out from the mean described the range given by Greenwood#
+#
+##FIRST make the tree ultrametric to faciliate visualization and to allow various analyses to run the way they are supposed to#
+#
+meliphagidae2 <- chronopl(meliphagidae, lambda = 0.1)#
+#
+##set the working directory to the desktop. this is where the output files will be saved to#
+#
+#setwd("~/Desktop")#
+#
+##fit the different models of evolution.#
+#
+##create a data frame for a mean/sd style root prior. #
+#
+root.prior <- data.frame(mean=log10(1250), sd=0.079, priortype="normal")#
+#
+##Graham Slater said that I want acceptance rates of 0.25-0.7. Going through his code, it appears that these are what are printing to the screen, though I'm not sure what the range of values printing are (I can see that all except "trend" should print 3 values, while that should print 4). Nevertheless, running with the default propwidth (which is rep(0.1, 5)), the acceptance rates are generally higher than they should be. The first value in the numeric vector 5-long refers to the root state proposal width, which is the one we're most concerned about. So, try modifying that...in the end I used trial and error. The fourth term in the numeric vector doesn't matter (it relates to OU model and is not yet implemented)#
+#
+propwidth <- c(0.15, 0.5, 0.4, 0.1, 0.4)#
+#
+##i then used this propwidth to fit various iterations of the models. ACDC linear was always best supported, but i had trouble fitting the beta parameters--a very large value was always supported, but there was also a huge spread of good values. #
+##this was true whether i used the aboved propwidth, or propwidth <- c(0.1, 0.5, 0.4, 0.1, 0.4) , which kept the acceptance rates for the ACDC models closer to the sweet spot.#
+##in the end, I only used BM and trend. if you want to use ACDC, remember these propwidths here. and remember to fit limits to the acdc parameter. from the equation end rate = sigma sq + beta * T where T is the length of your tree#
+##Graham has a function to do this, but it's hidden. to access it#
+#
+#acdc.lin.priors = fitContinuousMCMC:::ACDC.prior(meliphagidae2, "ACDC.lin", decrease.max = -1, increase.max = 3)#
+#
+##for the exp priors, have to be careful. Harmon et al. observed values as small as -0.15. to generate that call the decrease.max as below. call the increase.max so it ends up being 3. #
+#
+#acdc.exp.priors = fitContinuousMCMC:::ACDC.prior(meliphagidae2, "ACDC.exp", decrease.max = 0.8, increase.max = 10)#
+#
+##SSP is currently broken in this package. Graham needs to fix it still#
+#
+#fitContinuousMCMC(meliphagidae2, bio12niche, model="BM", Ngens=1e7, sampleFreq=100, printFreq=100, propwidth=propwidth, root.prior=root.prior, outputName="precip_BM3")#
+#
+#fitContinuousMCMC(meliphagidae2, bio12niche, model="Trend", Ngens=1e7, sampleFreq=100, printFreq=100, propwidth=propwidth, root.prior=root.prior, outputName="precip_trend3")#
+#
+##also tried running it over different temperature models. again, ACDC linear was best. but again, hard to fit the parameters right. again, just go with BM and trend#
+#
+##the mean comes from Greenwood et al 2003 (16-22 deg C), and the sd such that 2sd out from 20 deg C is 16 & 22#
+#
+root.prior <- data.frame(mean=19, sd=1.5, priortype="normal")#
+#
+propwidth <- c(3, 0.5, 4, 4, 4)#
+#
+#fitContinuousMCMC(meliphagidae2, bio1niche, model="Trend", Ngens=1e7, sampleFreq=100, printFreq=100, propwidth=propwidth, root.prior=root.prior, outputName="temp_trend3")#
+#
+#fitContinuousMCMC(meliphagidae2, bio1niche, model="BM", Ngens=1e7, sampleFreq=100, printFreq=100, propwidth=propwidth, root.prior=root.prior, outputName="temp_BM3")#
+#
+##load in the different results files of interest. i manually copied them into the main meliphagidae working folder. can set working directory back there if you changed it to desktop above#
+#
+bm.precip.res <- read.table("precip_BM3_model_params.txt", header= TRUE)#
+#
+head(bm.precip.res)#
+#
+trend.precip.res <- read.table("precip_trend3_model_params.txt", header= TRUE)#
+#
+head(trend.precip.res)#
+#
+##load in the precipitation node state files as well!#
+#
+bm.precip.nodes <- read.table("precip_BM3_nodestates.txt", header= TRUE)#
+#
+trend.precip.nodes <- read.table("precip_trend3_nodestates.txt", header= TRUE)
+library(plotrix)
+x<-rnorm(20)y<-rnorm(20)
+plot(x,y,col=color.scale(y,c(0,1,1),c(1,1,0),0),main="Color scale plot",pch=16,cex=2)
+plot(1:10,rep(1:3,length.out=10),axes=FALSE,type="n",xlim=c(0,11),ylim=c(0,4),main="Test of RGB, HSV and HCL",xlab="",ylab="Color specification")
+axis(2,at=1:3,labels=c("HCL","HSV","RGB"))points(1:10,rep(1,10),pch=19,cex=8,col=color.scale(1:10,c(0,300),35,85,color.spec="hcl"))
+points(1:10,rep(2,10),pch=19,cex=8,col=color.scale(1:10,c(0,1),0.8,1,color.spec="hsv"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(1:10,c(1,0.5,0),c(0,0.5,0),c(0,0,1),color.spec="rgb"))
+plot(1:10,rep(1:3,length.out=10),axes=FALSE,type="n",xlim=c(0,11),ylim=c(0,4),main="Test of RGB, HSV and HCL",xlab="",ylab="Color specification")axis(2,at=1:3,labels=c("HCL","HSV","RGB"))points(1:10,rep(1,10),pch=19,cex=8,col=color.scale(1:10,c(0,300),35,85,color.spec="hcl"))points(1:10,rep(2,10),pch=19,cex=8,col=color.scale(1:10,c(0,1),0.8,1,color.spec="hsv"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(1:10,c(1,0,0),c(0.5,0,0),c(0.2,0,0),color.spec="rgb"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(1:10,c(2,0,0),c(0.5,0,0),c(0.2,0,0),color.spec="rgb"))
+plot(1:10,rep(1:3,length.out=10),axes=FALSE,type="n",xlim=c(0,11),ylim=c(0,4),main="Test of RGB, HSV and HCL",xlab="",ylab="Color specification")axis(2,at=1:3,labels=c("HCL","HSV","RGB"))points(1:10,rep(1,10),pch=19,cex=8,col=color.scale(1:10,c(0,300),35,85,color.spec="hcl"))points(1:10,rep(2,10),pch=19,cex=8,col=color.scale(1:10,c(0,1),0.8,1,color.spec="hsv"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(1:10,c(2,0,0),c(0.5,0,0),c(0.2,0,0),color.spec="rgb"))
+plot(1:10,rep(1:3,length.out=10),axes=FALSE,type="n",xlim=c(0,11),ylim=c(0,4),main="Test of RGB, HSV and HCL",xlab="",ylab="Color specification")axis(2,at=1:3,labels=c("HCL","HSV","RGB"))points(1:10,rep(1,10),pch=19,cex=8,col=color.scale(1:10,c(0,300),35,85,color.spec="hcl"))points(1:10,rep(2,10),pch=19,cex=8,col=color.scale(1:10,c(0,1),0.8,1,color.spec="hsv"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(1:10,c(1,0,0),c(0.9,0,0),c(0.8,0,0),color.spec="rgb"))
+plot(1:10,rep(1:3,length.out=10),axes=FALSE,type="n",xlim=c(0,11),ylim=c(0,4),main="Test of RGB, HSV and HCL",xlab="",ylab="Color specification")axis(2,at=1:3,labels=c("HCL","HSV","RGB"))points(1:10,rep(1,10),pch=19,cex=8,col=color.scale(1:10,c(0,300),35,85,color.spec="hcl"))points(1:10,rep(2,10),pch=19,cex=8,col=color.scale(1:10,c(0,1),0.8,1,color.spec="hsv"))
+points(1:10,rep(3,10),pch=19,cex=8,col=color.scale(c(1,0,0),c(0.9,0,0),c(0.8,0,0),color.spec="rgb"))
 plot(0:1, type="n", axes=FALSE)#
 #
 ##define a gradient from blue to cyan to green to yellow to red. the more slices the smoother#
@@ -3868,296 +7800,11 @@ Sys.which("pdflatex")
 data(iris)
 dput(iris$Petal.Width)
 ?dput
-library(ape)#
-library(picante)#
-library(phytools)#
-tree <- read.tree("meli_ultra.tre")#
-bio12niche <- read.csv("bio12niche.csv")#
-bio1niche <- read.csv("bio1niche.csv")#
-row.names(bio12niche) <- bio12niche[,1]#
-bio12niche[,1] <- NULL#
-row.names(bio1niche) <- bio1niche[,1]#
-bio1niche[,1] <- NULL#
-#
-bio1niche <- df2vec(bio1niche)#
-bio12niche <- df2vec(bio12niche)#
-#
-REML.bio1 <- ace(bio1niche, tree, type="continuous", method="REML")#
-REML.bio12 <- ace(bio12niche, tree, type="continuous", method="REML")#
-#
-species.niches <- cbind(bio1niche, bio12niche)#
-#
-node.niches <- cbind(REML.bio1$ace, REML.bio12$ace)#
-#
-climate.points <- cbind(rnorm(100, mean=20, sd=3), rnorm(100, mean=2.8, sd=0.2))#
-#
-##define phylospace function#
-#
-test <- phylospace(tree, species.niches, node.niches)
 library(devtools)
 load_all()
-test <- phylospace(tree, species.niches, node.niches)
-test
-plot(test)
-plot.phylospace
-dev_help("phylospace")
 library(ape)#
 #
 #simulate tree with birth-death process#
-tree <- rbdtree(birth=0.1, death=0, Tmax=40)#
-#
-#prune the phylogeny down to 50 species#
-tree <- drop.tip(tree, tip=51:length(tree$tip.label))#
-#
-#simulate trait evolution up tree with Brownian motion process#
-trait1 <- rTraitCont(tree, model="BM")#
-trait2 <- rTraitCont(tree, model="BM")#
-#
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=0, sd=1), rnorm(100, mean=0, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-phylobase.phylo <- suppressWarnings(as(tree,"phylo4"))
-test
-entire
-phylobase.phylo
-document()
-plot(entire)
-ls()
-plot(test)
-entire
-test
-plot(entire)
-document()
-plot(entire)
-plot(test)
-plot(entire)
-document()
-plot(entire)
-plot(entire, x.limits=c(-1.5,0), y.limits=c(0.5,1))
-document()
-plot(entire, x.limits=c(-1.5,0), y.limits=c(0.5,1))
-plot(entire, x.limits=c(-1.5,0), y.limits=c(-0.5,1))
-x
-temp.x
-document()
-plot(entire)
-document()
-plot(entire)
-plot(test)
-plot(entire)
-document()
-plot(entire)
-plot(entire, x.limits=c(-1.1,1), y.limits=c(-0.1,0.1))
-plot(entire, x.limits=c(-1.1,-1), y.limits=c(-0.1,0.1))
-plot(entire, x.limits=c(-1.2,-1), y.limits=c(-0.1,0.1))
-plot(entire)
-plot(entire, x.limits=c(-1.2,-1), y.limits=c(-0.5,0.2))
-plot(entire)
-plot(entire, x.limits=c(0,0.5), y.limits=c(-0.5,-0.2))
-quartz()
-plot(entire)
-document()
-plot(entire)
-document()
-plot(entire)
-quartz()
-document()
-plot(entire)
-document()
-plot(entire)
-plot(entire, x.limits=c(0.6,0.7), y.limits=c(-0.5,0))
-plot(entire, x.limits=c(0.6,0.7), y.limits=c(-0.3,-0.1))
-plot(entire)
-plot(entire, x.limits=c(-0.4,0.1), y.limits=c(0.4,0.5))
-plot(entire, x.limits=c(-0.2,0.2), y.limits=c(0.4,0.5))
-plot(entire)
-plot(entire, lwd=2)
-plot(test)
-?rTraitCont
-trait1
-center(trait1)
-scale(trait1, center=10)
-?scale
-document()
-dev_help("phylospace")
-tree <- rbdtree(birth=0.1, death=0, Tmax=40)#
-#
-#prune the phylogeny down to 50 species#
-tree <- drop.tip(tree, tip=51:length(tree$tip.label))#
-#
-#simulate trait evolution up tree with Brownian motion process#
-trait1 <- rTraitCont(tree, model="BM")#
-trait2 <- rTraitCont(tree, model="BM")#
-#
-#add an arbitrary value to the traits so non are negative
-species.niches <- cbind(trait1, trait2)
-class(species.niches)
-document()
-dev_help("phylospace")
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-quartz()
-trait1 <- trait1 + 10#
-trait2 <- trait2 + 10#
-#
-#bind the traits together into a matrix#
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-node.niches
-species.niches
-document()
-plot(entire)
-document()
-plot(entire)
-ls()
-plot(test)
-tree
-entire
-test
-entire$ape.phylo
-tree <- rbdtree(birth=0.1, death=0, Tmax=40)#
-#
-#prune the phylogeny down to 50 species#
-tree <- drop.tip(tree, tip=51:length(tree$tip.label))
-tree
-tree$edge.length
-tree$edge.length <- tree$edge.length/max(tree$edge.length)
-tree$edge.length
-trait1 <- rTraitCont(tree, model="BM")#
-trait2 <- rTraitCont(tree, model="BM")
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0, lwd=2)
-trait1 <- trait1 + 10#
-trait2 <- trait2 + 10#
-#
-#bind the traits together into a matrix#
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-max(test$entire$edge.length)
-max(test$ape.phylo$edge.length)
-test$ape.phylo
-plot(test$ape.phylo)
-plot(entire$ape.phylo)
-rstree<-transform(tree,"depth",1) # rescale tree to have root to tip distance of 1.
-library(geiger)
-rstree<-transform(tree,"depth",1) # rescale tree to have root to tip distance of 1.
-rstree
-plot(rstree)
-tree <- rstree
-tree$edge.legnth
-tree$edge.length
-trait1 <- rTraitCont(tree, model="BM")#
-trait2 <- rTraitCont(tree, model="BM")#
-#
-#add an arbitrary value to the traits so non are negative#
-trait1 <- trait1 + 10#
-trait2 <- trait2 + 10#
-#
-#bind the traits together into a matrix#
-species.niches <- cbind(trait1, trait2)#
-#
-#reconstruct ancestral states#
-nodes.trait1 <- ace(trait1, tree, type="continuous", method="REML")#
-nodes.trait2 <- ace(trait2, tree, type="continuous", method="REML")#
-#
-node.niches <- cbind(nodes.trait1$ace, nodes.trait2$ace)#
-#
-#simulate available climate space#
-climate.points <- cbind(rnorm(500, mean=10, sd=1), rnorm(100, mean=10, sd=1))#
-#
-#calculate a phylospace object for the entire phylogeny#
-entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)#
-#
-#plot the entire phylospace, with species labels plotted and slightly offset from tips#
-plot(entire, species.labels=TRUE, label.adjust=0.05, lwd=2)
-document()
-dev_help("phylospace")
 tree <- rbdtree(birth=0.1, death=0, Tmax=40)#
 #
 #prune the phylogeny down to 50 species#
@@ -4184,6 +7831,17 @@ entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niche
 #
 #plot the entire phylospace, with species labels plotted and slightly offset from tips, and with available climate space in background#
 plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
-entire
-plot(test)
-plot(test, lwd=2)
+plot(entire)
+plot(entire)
+plot(entire, lwd=2)
+plot(entire, lwd=2, node.labels=T)
+plot(entire, lwd=2, node.labels=T, x.limits=c(0,1), y.limits=c(0,1))
+plot(entire$ape.phylo)
+nodelabels()
+quartz()
+plot(entire)
+plot(entire, lwd=2, node.labels=T, x.limits=c(0,1), y.limits=c(0,1))
+test2 <- phylospace(tree, species.niches, node.niches, subset.node=89)
+plot(test2)
+document()
+check()

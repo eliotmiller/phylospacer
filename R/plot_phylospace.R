@@ -182,21 +182,10 @@ plot.phylospace <- function(phylospace.object, climate.points, species.labels=FA
 		
 		##calculate the euclidean distance between each successive x,y point
 		
-		xydist <- sqrt(x^2+y^2)
+		xy <- data.frame(x,y)
 
-		##this is necessary because the color.scale lines has no way that i know of to tell it which direction the segment is "going"
-		##thus, when the segments are "going" towards quadrants III or IV, it flips the scale away from what you want.
-		##i believe there may need to be modifications made here. in fact, i'm probably going to have to recode this from the ground up
-	
-		if(temp.quad == "quadrant3" & x[breaks+1] > 0)
-		{
-			xydist <- (-1)*xydist
-		}
-		else if(temp.quad == "quadrant4" & x[breaks+1] > 0)
-		{
-			xydist <- (-1)*xydist
-		}
-	
+		xydist <- as.matrix(dist(xy))[,1]
+
 		##the way this works is if you want it to go from just blue (0,0,1) to cyan (0,1,1) you code it c(0,0),c(0,1),c(1,1) and if you wanted it to go from cyan to blue to cyan it would be c(0,0,0),c(1,0,1),c(1,1,1), etc. the first place in each argument refers to color 1, the second place color 2, etc.
 
 		color.scale.lines(x,y,c(temp.segments.to.plot$from.r[i],temp.segments.to.plot$to.r[i]),c(temp.segments.to.plot$from.g[i],temp.segments.to.plot$to.g[i]),c(temp.segments.to.plot$from.b[i],temp.segments.to.plot$to.b[i]),colvar=xydist,...)
