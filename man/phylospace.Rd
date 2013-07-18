@@ -3,7 +3,8 @@
 \title{Create a phylospace object.}
 \usage{
   phylospace(ape.phylo, species.niches, node.niches,
-    subset.node, subset.to.root = FALSE, jitter.level = 0)
+    subset.node, subset.to.root = FALSE, jitter.level = 0,
+    replacement.colors)
 }
 \arguments{
   \item{ape.phylo}{Phylo object}
@@ -28,6 +29,20 @@
   \item{jitter.level}{Optional numeric value to jitter both
   species and node values. Useful for when species' and/or
   nodes have very similar trait values.}
+
+  \item{replacement.colors}{Optional vector of replacement
+  colors by which to scale the phylospace. If not
+  specified, defaults to blue to cyan to green to yellow to
+  red. Otherwise, a vector of 15 numbers needs to be
+  provided. This vector needs to be in the form of color1
+  red, color1 green, color1 blue, color2 red, color2 green,
+  color2 blue...color5 red, color5 green, color5 blue. The
+  value of each of the 15 numbers needs to be between 0 and
+  1, e.g. if you want color1 to be red, the first three
+  numbers need to be 1,0,0, and if you want color2 to be
+  yellow, the second three numbers need to be 1,1,0. Color1
+  refers to color closest to root, while color5 is the
+  color of the tips. See examples for futher details.}
 }
 \value{
   Returns a phylospace object, which is a list with five
@@ -72,7 +87,7 @@ library(ape)
 #simulate tree with birth-death process
 tree <- rbdtree(birth=0.1, death=0, Tmax=40)
 
-#prune the phylogeny down to 50 species
+#prune the phylogeny down to 50 species. if you get an error here, re-run.
 tree <- drop.tip(tree, tip=51:length(tree$tip.label))
 
 #simulate trait evolution up tree with Brownian motion process
@@ -95,6 +110,23 @@ climate.points <- cbind(rnorm(500, mean=0, sd=1), rnorm(100, mean=0, sd=1))
 entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches)
 
 #plot the entire phylospace, with species labels plotted and slightly offset from tips, and with available climate space in background
+plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+
+#plot the same phylospace as previous example, but with a green scale
+entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(0,0.1,0,0,0.4,0,0,0.6,0,0,0.8,0,0,1,0))
+plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+
+#plot the same phylospace as previous example, but with color scale from black to blue to purple to red to orange
+black <- c(0,0,0)
+blue <- c(0,0,1)
+purple <- c(1,0,1)
+red <- c(1,0,0)
+orange <- c(1,0.5,0)
+entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(black, blue, purple, red, orange))
+plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+
+#plot the same phylospace as previous example, but in grayscale
+entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(0.95,0.95,0.95, 0.75,0.75,0.75, 0.5,0.5,0.5, 0.25,0.25,0.25, 0,0,0))
 plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
 
 #Example of how one could create a series of panels for an animation. Here we are retaining all branches from each subset node to the root

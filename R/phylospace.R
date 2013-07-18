@@ -15,6 +15,15 @@
 #' be retained in the resulting phylospace object.
 #' @param jitter.level Optional numeric value to jitter both species and node values. 
 #' Useful for when species' and/or nodes have very similar trait values.
+#' @param replacement.colors Optional vector of replacement colors by which to scale the
+#' phylospace. If not specified, defaults to blue to cyan to green to yellow to red.
+#' Otherwise, a vector of 15 numbers needs to be provided. This vector needs to be
+#' in the form of color1 red, color1 green, color1 blue, color2 red, color2 green, color2
+#' blue...color5 red, color5 green, color5 blue. The value of each of the 15 numbers needs
+#' to be between 0 and 1, e.g. if you want color1 to be red, the first three numbers need
+#' to be 1,0,0, and if you want color2 to be yellow, the second three numbers need to be
+#' 1,1,0. Color1 refers to color closest to root, while color5 is the color of the tips. 
+#' See examples for futher details. 
 #' 
 #' @details This function does not currently reconstruct ancestral states. These need to
 #' be calculated beforehand with any of a variety of functions, e.g. fastAnc() in phytools
@@ -49,7 +58,7 @@
 #' #simulate tree with birth-death process
 #' tree <- rbdtree(birth=0.1, death=0, Tmax=40)
 #'
-#' #prune the phylogeny down to 50 species
+#' #prune the phylogeny down to 50 species. if you get an error here, re-run.
 #' tree <- drop.tip(tree, tip=51:length(tree$tip.label))
 #'
 #' #simulate trait evolution up tree with Brownian motion process
@@ -74,6 +83,23 @@
 #' #plot the entire phylospace, with species labels plotted and slightly offset from tips, and with available climate space in background
 #' plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
 #'
+#' #plot the same phylospace as previous example, but with a green scale
+#' entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(0,0.1,0,0,0.4,0,0,0.6,0,0,0.8,0,0,1,0))
+#' plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+#'
+#' #plot the same phylospace as previous example, but with color scale from black to blue to purple to red to orange
+#' black <- c(0,0,0)
+#' blue <- c(0,0,1)
+#' purple <- c(1,0,1)
+#' red <- c(1,0,0)
+#' orange <- c(1,0.5,0)
+#' entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(black, blue, purple, red, orange))
+#' plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+#'
+#' #plot the same phylospace as previous example, but in grayscale
+#' entire <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, replacement.colors=c(0.95,0.95,0.95, 0.75,0.75,0.75, 0.5,0.5,0.5, 0.25,0.25,0.25, 0,0,0))
+#' plot(entire, species.labels=TRUE, climate.points=climate.points, label.adjust=0.05, lwd=2)
+#'
 #' #Example of how one could create a series of panels for an animation. Here we are retaining all branches from each subset node to the root
 #' cladeA <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, subset.node=63, subset.to.root=TRUE)
 #' cladeB <- phylospace(tree, species.niches=species.niches, node.niches=node.niches, subset.node=75, subset.to.root=TRUE)
@@ -88,7 +114,7 @@
 #' #Example of how to quickly plot phylospace for a small clade without the edges to the root.
 #' plot(phylospace(tree, species.niches, node.niches, subset.node=85), lwd=2)
 
-phylospace <- function(ape.phylo, species.niches, node.niches, subset.node, subset.to.root=FALSE, jitter.level=0)
+phylospace <- function(ape.phylo, species.niches, node.niches, subset.node, subset.to.root=FALSE, jitter.level=0, replacement.colors)
 {	
 	##convert to phylobase phylo. the suppress warnings command is because if one makes a tree ultrametric it can come with some unexpected parameters that phylobase doesn't know how to deal with. just ignores them and all is fine, but no reason to print warnings.	
 	phylobase.phylo <- suppressWarnings(as(ape.phylo,"phylo4"))
@@ -147,11 +173,24 @@ phylospace <- function(ape.phylo, species.niches, node.niches, subset.node, subs
 	##make an empty character vector for use in coloring branches and fill based on distance of respective node to root. 
 	node.color <- character(length(root.dist))
 	names(node.color) <- names(root.dist)
-	node.color[root.dist >= 0 & root.dist < one] <- "blue"
-	node.color[root.dist >= one & root.dist < two] <- "cyan"
-	node.color[root.dist >= two & root.dist < three] <- "green"
-	node.color[root.dist >= three & root.dist <= four] <- "yellow"
-	node.color[root.dist > four] <- "red"
+
+	if(missing(replacement.colors))
+	{
+		##make an empty character vector for use in coloring branches and fill based on distance of respective node to root. 
+		node.color[root.dist >= 0 & root.dist < one] <- "blue"
+		node.color[root.dist >= one & root.dist < two] <- "cyan"
+		node.color[root.dist >= two & root.dist < three] <- "green"
+		node.color[root.dist >= three & root.dist <= four] <- "yellow"
+		node.color[root.dist > four] <- "red"
+	}
+	else if(!missing(replacement.colors))
+	{
+		node.color[root.dist >= 0 & root.dist < one] <- "color1"
+		node.color[root.dist >= one & root.dist < two] <- "color2"
+		node.color[root.dist >= two & root.dist < three] <- "color3"
+		node.color[root.dist >= three & root.dist <= four] <- "color4"
+		node.color[root.dist > four] <- "color5"
+	}
 
 	##bind the character vector colors back into the segments to plot dataframe, first by ancestor, then by descendent
 	temp <- as.data.frame(node.color)
@@ -168,72 +207,90 @@ phylospace <- function(ape.phylo, species.niches, node.niches, subset.node, subs
 
 	##add six new columns here. The first three will specify in R,G,B space the color from the "from" column, the second are for the "to" column
 
-	for(i in 1:dim(segments.to.plot)[1])
+	if(missing(replacement.colors))
 	{
-		if(segments.to.plot$from[i] == "blue")
-		{
-			segments.to.plot$from.r[i] = 0
-			segments.to.plot$from.g[i] = 0
-			segments.to.plot$from.b[i] = 1
-		}
-		else if(segments.to.plot$from[i] == "cyan")
-		{
-			segments.to.plot$from.r[i] = 0
-			segments.to.plot$from.g[i] = 1
-			segments.to.plot$from.b[i] = 1
-		}
-		else if(segments.to.plot$from[i] == "green")
-		{
-			segments.to.plot$from.r[i] = 0
-			segments.to.plot$from.g[i] = 1
-			segments.to.plot$from.b[i] = 0
-		}
-		else if(segments.to.plot$from[i] == "yellow")
-		{
-			segments.to.plot$from.r[i] = 1
-			segments.to.plot$from.g[i] = 1
-			segments.to.plot$from.b[i] = 0
-		}
-		else if(segments.to.plot$from[i] == "red")
-		{
-			segments.to.plot$from.r[i] = 1
-			segments.to.plot$from.g[i] = 0
-			segments.to.plot$from.b[i] = 0
-		}
+		segments.to.plot$from.r[segments.to.plot$from == "blue"] <- 0
+		segments.to.plot$from.g[segments.to.plot$from == "blue"] <- 0
+		segments.to.plot$from.b[segments.to.plot$from == "blue"] <- 1
+		
+		segments.to.plot$from.r[segments.to.plot$from == "cyan"] <- 0
+		segments.to.plot$from.g[segments.to.plot$from == "cyan"] <- 1
+		segments.to.plot$from.b[segments.to.plot$from == "cyan"] <- 1
+		
+		segments.to.plot$from.r[segments.to.plot$from == "green"] <- 0
+		segments.to.plot$from.g[segments.to.plot$from == "green"] <- 1
+		segments.to.plot$from.b[segments.to.plot$from == "green"] <- 0
+
+		segments.to.plot$from.r[segments.to.plot$from == "yellow"] <- 1
+		segments.to.plot$from.g[segments.to.plot$from == "yellow"] <- 1
+		segments.to.plot$from.b[segments.to.plot$from == "yellow"] <- 0
+
+		segments.to.plot$from.r[segments.to.plot$from == "red"] <- 1
+		segments.to.plot$from.g[segments.to.plot$from == "red"] <- 0
+		segments.to.plot$from.b[segments.to.plot$from == "red"] <- 0
+
+		segments.to.plot$to.r[segments.to.plot$to == "blue"] <- 0
+		segments.to.plot$to.g[segments.to.plot$to == "blue"] <- 0
+		segments.to.plot$to.b[segments.to.plot$to == "blue"] <- 1
+		
+		segments.to.plot$to.r[segments.to.plot$to == "cyan"] <- 0
+		segments.to.plot$to.g[segments.to.plot$to == "cyan"] <- 1
+		segments.to.plot$to.b[segments.to.plot$to == "cyan"] <- 1
+		
+		segments.to.plot$to.r[segments.to.plot$to == "green"] <- 0
+		segments.to.plot$to.g[segments.to.plot$to == "green"] <- 1
+		segments.to.plot$to.b[segments.to.plot$to == "green"] <- 0
+
+		segments.to.plot$to.r[segments.to.plot$to == "yellow"] <- 1
+		segments.to.plot$to.g[segments.to.plot$to == "yellow"] <- 1
+		segments.to.plot$to.b[segments.to.plot$to == "yellow"] <- 0
+
+		segments.to.plot$to.r[segments.to.plot$to == "red"] <- 1
+		segments.to.plot$to.g[segments.to.plot$to == "red"] <- 0
+		segments.to.plot$to.b[segments.to.plot$to == "red"] <- 0
 	}
 
-	for(i in 1:dim(segments.to.plot)[1])
+	else
 	{
-		if(segments.to.plot$to[i] == "blue")
-		{
-			segments.to.plot$to.r[i] = 0
-			segments.to.plot$to.g[i] = 0
-			segments.to.plot$to.b[i] = 1
-		}
-		else if(segments.to.plot$to[i] == "cyan")
-		{
-			segments.to.plot$to.r[i] = 0
-			segments.to.plot$to.g[i] = 1
-			segments.to.plot$to.b[i] = 1
-		}
-		else if(segments.to.plot$to[i] == "green")
-		{
-			segments.to.plot$to.r[i] = 0
-			segments.to.plot$to.g[i] = 1
-			segments.to.plot$to.b[i] = 0
-		}
-		else if(segments.to.plot$to[i] == "yellow")
-		{
-			segments.to.plot$to.r[i] = 1
-			segments.to.plot$to.g[i] = 1
-			segments.to.plot$to.b[i] = 0
-		}
-		else if(segments.to.plot$to[i] == "red")
-		{
-			segments.to.plot$to.r[i] = 1
-			segments.to.plot$to.g[i] = 0
-			segments.to.plot$to.b[i] = 0
-		}
+		segments.to.plot$from.r[segments.to.plot$from == "color1"] <- replacement.colors[1]
+		segments.to.plot$from.g[segments.to.plot$from == "color1"] <- replacement.colors[2]
+		segments.to.plot$from.b[segments.to.plot$from == "color1"] <- replacement.colors[3]
+		
+		segments.to.plot$from.r[segments.to.plot$from == "color2"] <- replacement.colors[4]
+		segments.to.plot$from.g[segments.to.plot$from == "color2"] <- replacement.colors[5]
+		segments.to.plot$from.b[segments.to.plot$from == "color2"] <- replacement.colors[6]
+		
+		segments.to.plot$from.r[segments.to.plot$from == "color3"] <- replacement.colors[7]
+		segments.to.plot$from.g[segments.to.plot$from == "color3"] <- replacement.colors[8]
+		segments.to.plot$from.b[segments.to.plot$from == "color3"] <- replacement.colors[9]
+
+		segments.to.plot$from.r[segments.to.plot$from == "color4"] <- replacement.colors[10]
+		segments.to.plot$from.g[segments.to.plot$from == "color4"] <- replacement.colors[11]
+		segments.to.plot$from.b[segments.to.plot$from == "color4"] <- replacement.colors[12]
+
+		segments.to.plot$from.r[segments.to.plot$from == "color5"] <- replacement.colors[13]
+		segments.to.plot$from.g[segments.to.plot$from == "color5"] <- replacement.colors[14]
+		segments.to.plot$from.b[segments.to.plot$from == "color5"] <- replacement.colors[15]
+
+		segments.to.plot$to.r[segments.to.plot$to == "color1"] <- replacement.colors[1]
+		segments.to.plot$to.g[segments.to.plot$to == "color1"] <- replacement.colors[2]
+		segments.to.plot$to.b[segments.to.plot$to == "color1"] <- replacement.colors[3]
+		
+		segments.to.plot$to.r[segments.to.plot$to == "color2"] <- replacement.colors[4]
+		segments.to.plot$to.g[segments.to.plot$to == "color2"] <- replacement.colors[5]
+		segments.to.plot$to.b[segments.to.plot$to == "color2"] <- replacement.colors[6]
+		
+		segments.to.plot$to.r[segments.to.plot$to == "color3"] <- replacement.colors[7]
+		segments.to.plot$to.g[segments.to.plot$to == "color3"] <- replacement.colors[8]
+		segments.to.plot$to.b[segments.to.plot$to == "color3"] <- replacement.colors[9]
+
+		segments.to.plot$to.r[segments.to.plot$to == "color4"] <- replacement.colors[10]
+		segments.to.plot$to.g[segments.to.plot$to == "color4"] <- replacement.colors[11]
+		segments.to.plot$to.b[segments.to.plot$to == "color4"] <- replacement.colors[12]
+
+		segments.to.plot$to.r[segments.to.plot$to == "color5"] <- replacement.colors[13]
+		segments.to.plot$to.g[segments.to.plot$to == "color5"] <- replacement.colors[14]
+		segments.to.plot$to.b[segments.to.plot$to == "color5"] <- replacement.colors[15]
 	}
 
 	##if only a specific clade within the whole phylogeny is to be plotted, subset segments to plot accordingly
@@ -267,7 +324,16 @@ phylospace <- function(ape.phylo, species.niches, node.niches, subset.node, subs
 	##derive a vector of node names based on whatever nodes are left to be plotted
 	node.vector <- segments.to.plot$descendant[segments.to.plot$descendant > length(ape.phylo$tip.label)]
 
-	output <- list(ape.phylo=ape.phylo, segments.to.plot=segments.to.plot, name.vector=name.vector, subset.node=subset.node, node.vector=node.vector)
+	if(missing(replacement.colors))
+	{
+		replacement.colors <- "default"
+	}
+	else
+	{
+		replacement.colors <- replacement.colors
+	} 
+
+	output <- list(ape.phylo=ape.phylo, segments.to.plot=segments.to.plot, name.vector=name.vector, subset.node=subset.node, node.vector=node.vector, replacement.colors=replacement.colors)
 
 	class(output) <- "phylospace"
 

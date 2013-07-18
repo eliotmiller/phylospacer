@@ -192,9 +192,16 @@ plot.phylospace <- function(phylospace.object, climate.points, species.labels=FA
 	}
 
 	##add the species' points
-	points(phylospace.object$segments.to.plot$y1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)] ~ 
-		phylospace.object$segments.to.plot$x1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)], pch=20, col="red")
-
+	if(phylospace.object$replacement.colors[1] == "default")
+	{
+		points(phylospace.object$segments.to.plot$y1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)] ~ 
+			phylospace.object$segments.to.plot$x1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)], pch=20, col="red")
+	}
+	else
+	{
+		points(phylospace.object$segments.to.plot$y1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)] ~ 
+			phylospace.object$segments.to.plot$x1[phylospace.object$segments.to.plot$descendant <= length(phylospace.object$ape.phylo$tip.label)], pch=20, col=rgb(phylospace.object$segments.to.plot$to.r[1],phylospace.object$segments.to.plot$to.g[1],phylospace.object$segments.to.plot$to.b[1]))
+	}
 	##add text to the points, with offset equal to label.adjust argument. IMPORTANTLY, this will work best if x & y are on similar scales. need to revise this script so that it doesn'matter. to query graphical parameters after calling the blank plot: par("usr")
 	if(species.labels == TRUE & node.labels == FALSE)
 	{
